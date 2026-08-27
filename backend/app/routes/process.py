@@ -1,0 +1,543 @@
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status, Query
+from pydantic import BaseModel
+from typing import List
+import os
+import glob
+import numpy as np
+import cv2
+import threading
+import time
+import uuid
+from app.services.depth_service import depth_service
+from app.services.text3d_service import text3d_service, Text3DProviderError
+from app.processing.calibration import calibrate_depth_to_elevation
+from app.processing.analytics import calculate_slope, calculate_confidence, downsample_grid
+
+router = APIRouter()
+
+# Directories
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+UPLOAD_DIR = os.path.join(os.path.dirname(BASE_DIR), "uploads")
+MODEL_DIR = os.path.join(os.path.dirname(BASE_DIR), "models")
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# Pydantic models for request validation
+class GCPPoint(BaseModel):
+    x: float
+    y: float
+    elevation: float
+
+class CalibrateRequest(BaseModel):
+    gcp_points: List[GCPPoint]
+
+class TextTo3DRequest(BaseModel):
+    prompt: str
+    category: str = "Other"
+    style: str = "Realistic"
+    quality: str = "Balanced"
+
+
+def _load_finite_array(path: str, label: str) -> np.ndarray:
+    """Load a 2D numeric map and replace invalid values before math/WebGL export."""
+    try:
+        array = np.asarray(np.load(path), dtype=np.float32)
+    except Exception as exc:
+        raise ValueError(f"Error loading {label}: {exc}") from exc
+    if array.ndim != 2 or array.size == 0:
+        raise ValueError(f"{label.capitalize()} must be a non-empty 2D array")
+    finite = np.isfinite(array)
+    if not finite.any():
+        raise ValueError(f"{label.capitalize()} contains no finite values")
+    replacement = float(np.median(array[finite]))
+    return np.nan_to_num(array, nan=replacement, posinf=replacement, neginf=replacement)
+
+
+def _find_original_file(file_id: str) -> str | None:
+    pattern = os.path.join(UPLOAD_DIR, f"{file_id}.*")
+    files = [
+        path for path in glob.glob(pattern)
+        if not path.endswith(("_depth_visual.png", "_depth.npy", "_elevation.npy"))
+    ]
+    return files[0] if files else None
+
+
+TEXT3D_CATEGORIES = {"Object", "Vehicle", "Building", "Architecture", "Furniture", "Product", "Human", "Anime", "Character", "Animal", "Fantasy", "Other"}
+TEXT3D_STYLES = {"Realistic", "Stylized", "Cartoon", "Low Poly", "Anime", "Game Asset", "Product Visualization", "Architectural"}
+TEXT3D_QUALITY = {"Draft", "Balanced", "High", "Ultra"}
+TEXT3D_JOBS: dict[str, dict] = {}
+TEXT3D_LOCK = threading.Lock()
+
+
+def _enhance_text_prompt(prompt: str, category: str, style: str, quality: str) -> str:
+    detail = {"Draft": "clean web-ready topology", "Balanced": "clean topology, proportionate forms, and coherent PBR-ready materials", "High": "detailed clean topology, accurate proportions, high-quality materials, and web-ready GLB optimization", "Ultra": "high-detail clean topology, refined proportions, detailed materials, and optimized textured GLB output"}[quality]
+    return f"{prompt.strip()}. Create a single {style.lower()} {category.lower()} asset with {detail}. Center the subject, avoid text, logos, floating fragments, duplicate parts, and background scenery. Deliver a valid textured GLB."
+
+
+def _foreground_mask(image_path: str | None, normalized_depth: np.ndarray) -> tuple[np.ndarray, str]:
+    """Return a conservative foreground mask.
+
+    GrabCut is used when the source photograph is available.  It is deliberately
+    followed by a central connected-component selection because this product asks
+    for one primary object, not a semantic scene segmentation claim.
+    """
+    h, w = normalized_depth.shape
+    fallback = np.ones((h, w), dtype=np.uint8)
+    if not image_path:
+        return fallback, "depth fallback (source image unavailable)"
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image is None:
+        return fallback, "depth fallback (source image unreadable)"
+    image = cv2.resize(image, (w, h), interpolation=cv2.INTER_AREA)
+    try:
+        mask = np.zeros((h, w), np.uint8)
+        margin_x, margin_y = max(2, int(w * .06)), max(2, int(h * .06))
+        rect = (margin_x, margin_y, max(2, w - margin_x * 2), max(2, h - margin_y * 2))
+        background_model = np.zeros((1, 65), np.float64)
+        foreground_model = np.zeros((1, 65), np.float64)
+        cv2.grabCut(image, mask, rect, background_model, foreground_model, 4, cv2.GC_INIT_WITH_RECT)
+        binary = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 1, 0).astype(np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
+        if count > 1:
+            centre = np.array([w / 2, h / 2])
+            candidates = []
+            for index in range(1, count):
+                area = stats[index, cv2.CC_STAT_AREA]
+                distance = np.linalg.norm(centroids[index] - centre)
+                if area >= h * w * .015:
+                    candidates.append((area / (1 + distance * .02), index))
+            if candidates:
+                binary = (labels == max(candidates)[1]).astype(np.uint8)
+        coverage = float(binary.mean())
+        if .03 <= coverage <= .93:
+            return binary, "OpenCV GrabCut primary-subject segmentation"
+    except cv2.error:
+        pass
+
+    # A finite, conservative fallback is safer than an empty geometry.
+    cy0, cy1 = int(h * .10), max(int(h * .90), int(h * .10) + 1)
+    cx0, cx1 = int(w * .10), max(int(w * .90), int(w * .10) + 1)
+    fallback[cy0:cy1, cx0:cx1] = 1
+    return fallback, "central image fallback (segmentation uncertain)"
+
+
+@router.get("/process/{file_id}/input-analysis")
+def input_analysis(file_id: str):
+    """Return measurable, non-generative input-quality signals.
+
+    A scene classifier is intentionally not invented here: the installed local
+    model is Depth Anything, not a semantic classifier.  The client uses these
+    signals to guide the user toward the terrain or object workflow and asks for
+    confirmation when scene type matters.
+    """
+    image_path = _find_original_file(file_id)
+    if not image_path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Uploaded image not found.")
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The uploaded file could not be read as an image.")
+    height, width = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    contrast = float(gray.std())
+    pixels = width * height
+    resolution_score = 1.0 if pixels >= 2_000_000 else .82 if pixels >= 900_000 else .62 if pixels >= 350_000 else .38
+    sharpness_score = min(sharpness / 180.0, 1.0)
+    contrast_score = min(contrast / 55.0, 1.0)
+    quality = float(np.clip(.48 * resolution_score + .32 * sharpness_score + .20 * contrast_score, 0, 1))
+    quality_label = "Good" if quality >= .72 else "Usable" if quality >= .5 else "Limited"
+    recommendation = "Terrain" if width / max(height, 1) > 1.7 and contrast < 50 else "Choose Terrain for aerial/landscape imagery; choose Object for a building, person, vehicle, or subject."
+    return {
+        "file_id": file_id,
+        "width": width,
+        "height": height,
+        "input_quality": quality,
+        "input_quality_label": quality_label,
+        "sharpness": round(sharpness, 1),
+        "contrast": round(contrast, 1),
+        "scene_classification": "not_available",
+        "scene_classification_note": "No semantic image classifier is installed locally, so scene type requires user confirmation.",
+        "workflow_recommendation": recommendation,
+        "single_view_note": "One image supports depth and visible-surface reconstruction. Side and back geometry remain estimated."
+    }
+
+@router.post("/process/{file_id}/depth")
+def process_depth(file_id: str):
+    """
+    Run monocular depth estimation on a previously uploaded image.
+    Saves the relative depth map and returns visualization metadata.
+    """
+    pattern = os.path.join(UPLOAD_DIR, f"{file_id}.*")
+    matching_files = glob.glob(pattern)
+    
+    original_files = [
+        f for f in matching_files 
+        if not f.endswith("_depth_visual.png") and not f.endswith("_depth.npy") and not f.endswith("_elevation.npy")
+    ]
+    
+    if not original_files:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Uploaded image not found. Please upload the image first."
+        )
+        
+    image_path = original_files[0]
+    filename = os.path.basename(image_path)
+    _, ext = os.path.splitext(filename)
+    
+    try:
+        result = depth_service.run_depth_estimation(
+            image_path=image_path,
+            uploads_dir=UPLOAD_DIR,
+            file_id=file_id,
+            ext=ext
+        )
+        
+        result["original_image_url"] = f"/uploads/{file_id}{ext}"
+        result["visual_depth_url"] = f"/uploads/{result['visual_depth_file']}"
+        result["file_id"] = file_id
+        
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error executing depth estimation: {str(e)}"
+        )
+
+@router.post("/process/{file_id}/calibrate")
+def process_calibration(file_id: str, request: CalibrateRequest):
+    """
+    Calibrate a relative depth map to absolute/approximate physical elevation.
+    Requires relative depth map (npy) to be already generated.
+    """
+    depth_file_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    if not os.path.exists(depth_file_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Relative depth map not found. Please run depth estimation first."
+        )
+        
+    try:
+        depth_map = _load_finite_array(depth_file_path, "depth map")
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading depth map: {str(e)}"
+        )
+        
+    gcp_list = [gcp.dict() for gcp in request.gcp_points]
+    
+    try:
+        elevation_map, scale, offset, num_points_used, method = calibrate_depth_to_elevation(
+            depth_map=depth_map,
+            gcp_points=gcp_list
+        )
+        
+        elevation_filename = f"{file_id}_elevation.npy"
+        elevation_path = os.path.join(UPLOAD_DIR, elevation_filename)
+        np.save(elevation_path, elevation_map)
+        
+        return {
+            "file_id": file_id,
+            "scale": scale,
+            "offset": offset,
+            "num_points_used": num_points_used,
+            "method": method,
+            "elevation_min": float(elevation_map.min()),
+            "elevation_max": float(elevation_map.max()),
+            "is_calibrated": num_points_used > 0,
+            "message": "Depth calibration applied successfully."
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error applying calibration: {str(e)}"
+        )
+
+@router.get("/process/{file_id}/terrain")
+def get_terrain_data(
+    file_id: str,
+    grid_size: int = Query(128, ge=16, le=512, description="Target dimension of the downsampled square grid"),
+    pixel_size: float = Query(1.0, gt=0, description="Horizontal scale (pixel size) in meters for slope calculations")
+):
+    """
+    Generate and serve a downsampled terrain grid containing:
+      - Elevation values
+      - Slope values (degrees)
+      - Confidence values (0-1)
+    Allows smooth WebGL visualization in Three.js by optimizing the mesh density.
+    """
+    elevation_path = os.path.join(UPLOAD_DIR, f"{file_id}_elevation.npy")
+    depth_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    
+    # 1. Graceful elevation fallback: If not calibrated, perform relative calibration automatically
+    is_gcp_calibrated = os.path.exists(elevation_path)
+    
+    if not os.path.exists(depth_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Depth map not found. Please run depth estimation first."
+        )
+        
+    try:
+        depth_map = _load_finite_array(depth_path, "depth map")
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading depth map: {str(e)}"
+        )
+        
+    if is_gcp_calibrated:
+        try:
+            elevation_map = _load_finite_array(elevation_path, "calibrated elevation map")
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error loading calibrated elevation map: {str(e)}"
+            )
+    else:
+        # Perform default relative mapping (0m to 100m range)
+        try:
+            elevation_map, _, _, _, _ = calibrate_depth_to_elevation(depth_map, [])
+            # Save it so it's cached
+            np.save(elevation_path, elevation_map)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error applying auto-relative calibration: {str(e)}"
+            )
+
+    try:
+        # 2. Calculate Slope and Confidence
+        slope_map = calculate_slope(elevation_map, pixel_size)
+        confidence_map = calculate_confidence(depth_map)
+        
+        # 3. Downsample grids to optimize WebGL rendering
+        downsampled_elevation = downsample_grid(elevation_map, grid_size)
+        downsampled_slope = downsample_grid(slope_map, grid_size)
+        downsampled_confidence = downsample_grid(confidence_map, grid_size)
+        
+        # 4. Extract stats
+        stats = {
+            "elevation_min": float(downsampled_elevation.min()),
+            "elevation_max": float(downsampled_elevation.max()),
+            "slope_min": float(downsampled_slope.min()),
+            "slope_max": float(downsampled_slope.max()),
+            "confidence_min": float(downsampled_confidence.min()),
+            "confidence_max": float(downsampled_confidence.max())
+        }
+        
+        return {
+            "file_id": file_id,
+            "grid_size": grid_size,
+            "is_calibrated": is_gcp_calibrated,
+            "elevation_grid": np.nan_to_num(downsampled_elevation, nan=0.0, posinf=0.0, neginf=0.0).flatten().tolist(),
+            "slope_grid": np.nan_to_num(downsampled_slope, nan=0.0, posinf=0.0, neginf=0.0).flatten().tolist(),
+            "confidence_grid": np.clip(np.nan_to_num(downsampled_confidence, nan=0.0, posinf=0.0, neginf=0.0), 0, 1).flatten().tolist(),
+            "stats": stats
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating terrain analytics: {str(e)}"
+        )
+
+@router.get("/process/{file_id}/object")
+def get_object_reconstruction_data(
+    file_id: str,
+    grid_size: int = Query(128, ge=32, le=256, description="Square mesh resolution for object reconstruction")
+):
+    """Prepare finite depth and silhouette data for a client-side textured mesh.
+
+    The response is intentionally restricted to the visible surface and a marked
+    estimated shell.  A single photograph cannot measure an object's back.
+    """
+    depth_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    if not os.path.exists(depth_path):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Depth map not found. Please run depth estimation first.")
+    try:
+        depth = _load_finite_array(depth_path, "depth map")
+        values = depth[np.isfinite(depth)]
+        low, high = np.percentile(values, [2, 98])
+        if not np.isfinite(low) or not np.isfinite(high) or high - low < 1e-6:
+            normalized = np.zeros_like(depth, dtype=np.float32)
+        else:
+            normalized = np.clip((depth - low) / (high - low), 0, 1)
+        normalized = np.nan_to_num(normalized, nan=.5, posinf=1.0, neginf=0.0)
+        mask, segmentation_method = _foreground_mask(_find_original_file(file_id), normalized)
+
+        depth_grid = downsample_grid(normalized, grid_size)
+        mask_grid = downsample_grid(mask.astype(np.float32), grid_size)
+        confidence_grid = downsample_grid(calculate_confidence(depth), grid_size)
+        depth_grid = np.nan_to_num(depth_grid, nan=0.0, posinf=1.0, neginf=0.0)
+        mask_grid = np.nan_to_num(mask_grid, nan=0.0, posinf=0.0, neginf=0.0)
+        confidence_grid = np.clip(np.nan_to_num(confidence_grid, nan=0.0), 0, 1)
+        active = mask_grid > .45
+        reconstruction_confidence = float(np.clip(confidence_grid[active].mean() if active.any() else confidence_grid.mean(), 0, 1))
+        ys, xs = np.where(active)
+        bounds = {
+            "x_min": int(xs.min()) if xs.size else 0,
+            "x_max": int(xs.max()) if xs.size else grid_size - 1,
+            "y_min": int(ys.min()) if ys.size else 0,
+            "y_max": int(ys.max()) if ys.size else grid_size - 1,
+        }
+        return {
+            "file_id": file_id,
+            "grid_size": grid_size,
+            "depth_grid": depth_grid.flatten().tolist(),
+            "object_mask": mask_grid.flatten().tolist(),
+            "confidence_grid": confidence_grid.flatten().tolist(),
+            "stats": {"depth_min": float(depth_grid.min()), "depth_max": float(depth_grid.max()), "mask_coverage": float(active.mean()), "subject_bounds": bounds},
+            "reconstruction_confidence": reconstruction_confidence,
+            "segmentation_method": segmentation_method,
+            "estimated_regions": "Side and back surfaces are approximate because a single image only reveals the front-visible surface."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error preparing object reconstruction: {str(e)}")
+
+
+@router.post("/text-to-3d/enhance")
+def enhance_text_to_3d_prompt(request: TextTo3DRequest):
+    prompt = request.prompt.strip()
+    if len(prompt) < 4 or prompt.lower() in {"hello", "hi", "test", "model", "thing", "object"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter a meaningful 3D object description, for example: 'a red ceramic table lamp with a brass base'.")
+    if request.category not in TEXT3D_CATEGORIES or request.style not in TEXT3D_STYLES or request.quality not in TEXT3D_QUALITY:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported category, style, or quality option.")
+    return {"success": True, "enhanced_prompt": _enhance_text_prompt(prompt, request.category, request.style, request.quality)}
+
+
+def _run_text3d_job(job_id: str, payload: dict):
+    def update_status(current_status: str, message: str):
+        with TEXT3D_LOCK:
+            if job_id in TEXT3D_JOBS:
+                TEXT3D_JOBS[job_id].update({"status": current_status, "message": message, "updated_at": time.time()})
+    try:
+        result = text3d_service.generate(payload, MODEL_DIR, update_status)
+        with TEXT3D_LOCK:
+            TEXT3D_JOBS[job_id].update({"success": True, "status": "completed", "message": "3D model is ready.", "model_url": f"/models/{result['model_filename']}", "format": "glb", "metadata": result["provider_metadata"], "updated_at": time.time()})
+    except Text3DProviderError as error:
+        with TEXT3D_LOCK:
+            TEXT3D_JOBS[job_id].update({"success": False, "status": "failed", "error_code": error.code, "message": str(error), "updated_at": time.time()})
+    except Exception:
+        with TEXT3D_LOCK:
+            TEXT3D_JOBS[job_id].update({"success": False, "status": "failed", "message": "Text-to-3D generation failed unexpectedly. Check the configured provider and retry.", "updated_at": time.time()})
+
+
+@router.post("/text-to-3d", status_code=status.HTTP_202_ACCEPTED)
+def text_to_3d(request: TextTo3DRequest, background_tasks: BackgroundTasks):
+    prompt = request.prompt.strip()
+    if len(prompt) < 4 or len(prompt) > 1000 or prompt.lower() in {"hello", "hi", "test", "model", "thing", "object"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter a meaningful 3D object description between 4 and 1000 characters.")
+    if request.category not in TEXT3D_CATEGORIES or request.style not in TEXT3D_STYLES or request.quality not in TEXT3D_QUALITY:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported category, style, or quality option.")
+    if not text3d_service.configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Text-to-3D provider is not configured. Add the required provider credentials to the backend .env file.")
+    enhanced_prompt = _enhance_text_prompt(prompt, request.category, request.style, request.quality)
+    job_id = uuid.uuid4().hex
+    job = {"job_id": job_id, "success": True, "status": "queued", "message": "Generation job queued.", "prompt": prompt, "enhanced_prompt": enhanced_prompt, "category": request.category, "style": request.style, "quality": request.quality, "created_at": time.time(), "updated_at": time.time()}
+    with TEXT3D_LOCK:
+        TEXT3D_JOBS[job_id] = job
+    background_tasks.add_task(_run_text3d_job, job_id, {"prompt": prompt, "enhanced_prompt": enhanced_prompt, "category": request.category, "style": request.style, "quality": request.quality, "output_format": "glb"})
+    return {**job, "status_url": f"/api/text-to-3d/{job_id}"}
+
+
+def _safe_text3d_configuration():
+    """Safe configuration status only—never returns credentials or provider URL."""
+    settings = text3d_service.configuration()
+    return {"configured": settings["configured"], "provider_available": settings["configured"], "message": "Text-to-3D Ready" if settings["configured"] else "Text-to-3D provider is not configured. Add your provider URL and API key to backend/.env."}
+
+
+@router.get("/text3d/status")
+def text3d_status():
+    return _safe_text3d_configuration()
+
+
+@router.get("/text-to-3d/configuration")
+def text_to_3d_configuration():
+    # Backward-compatible route for older frontend sessions.
+    return _safe_text3d_configuration()
+
+
+@router.get("/text-to-3d/{job_id}")
+def get_text_to_3d_job(job_id: str):
+    with TEXT3D_LOCK:
+        job = TEXT3D_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Text-to-3D job not found or server restarted.")
+        return job
+
+@router.get("/process/{file_id}/analytics")
+def query_point_analytics(
+    file_id: str,
+    x: int = Query(..., description="Pixel X coordinate (column) in original image"),
+    y: int = Query(..., description="Pixel Y coordinate (row) in original image"),
+    pixel_size: float = Query(1.0, gt=0, description="Horizontal scale (pixel size) in meters")
+):
+    """
+    Lookup full-resolution elevation, slope, and confidence values at a specific pixel location.
+    Provides precise analytics for point-and-click operations.
+    """
+    elevation_path = os.path.join(UPLOAD_DIR, f"{file_id}_elevation.npy")
+    depth_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    
+    if not os.path.exists(depth_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Depth map not found. Please run depth estimation first."
+        )
+        
+    try:
+        depth_map = _load_finite_array(depth_path, "depth map")
+        height, width = depth_map.shape
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading depth map: {str(e)}"
+        )
+        
+    # Check spatial query boundary
+    if not (0 <= x < width and 0 <= y < height):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Query coordinates ({x}, {y}) out of range. Image dimensions are {width}x{height}."
+        )
+        
+    # Load elevation
+    is_gcp_calibrated = os.path.exists(elevation_path)
+    if is_gcp_calibrated:
+        try:
+            elevation_map = _load_finite_array(elevation_path, "elevation map")
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error loading elevation map: {str(e)}"
+            )
+    else:
+        # Load relative scale
+        elevation_map, _, _, _, _ = calibrate_depth_to_elevation(depth_map, [])
+        
+    try:
+        # Calculate full maps to get exact local gradient at the queried point
+        slope_map = calculate_slope(elevation_map, pixel_size)
+        confidence_map = calculate_confidence(depth_map)
+        
+        return {
+            "file_id": file_id,
+            "x": x,
+            "y": y,
+            "image_width": width,
+            "image_height": height,
+            "elevation": float(elevation_map[y, x]),
+            "slope": float(slope_map[y, x]),
+            "confidence": float(confidence_map[y, x]),
+            "is_calibrated": is_gcp_calibrated,
+            "message": "Approximate elevation (relative mapping)" if not is_gcp_calibrated else "Calibrated elevation"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error performing point query: {str(e)}"
+        )

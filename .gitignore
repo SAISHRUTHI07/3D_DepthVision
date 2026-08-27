@@ -1,0 +1,8 @@
+# Local provider credentials
+backend/.env
+backend/models/
+
+# Runtime output
+backend/uploads/
+__pycache__/
+*.pyc

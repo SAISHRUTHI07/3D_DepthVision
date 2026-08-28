@@ -44,13 +44,6 @@ export default function TerrainViewer({ fileId, depthResult, terrainData, onTerr
     }
   }
 
-  // ── Build / rebuild Three.js scene ─────────────────────────────────────────
-  useEffect(() => {
-    if (!terrainData || !mountRef.current) return
-    buildScene()
-    return () => destroyScene()
-  }, [terrainData, exag, vizMode, displayMode, showTexture, autoRotate])
-
   function buildScene() {
     destroyScene()
     const el = mountRef.current
@@ -230,6 +223,13 @@ export default function TerrainViewer({ fileId, depthResult, terrainData, onTerr
     }
     sceneRef.current = {}
   }
+
+  // ── Build / rebuild Three.js scene ─────────────────────────────────────────
+  useEffect(() => {
+    if (!terrainData || !mountRef.current) return undefined
+    buildScene()
+    return destroyScene
+  }, [terrainData, exag, vizMode, displayMode, showTexture, autoRotate])
 
   function resetCamera() {
     const { camera, controls } = sceneRef.current

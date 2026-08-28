@@ -101,8 +101,6 @@ export default function ObjectViewer({ fileId, uploadedFile, depthResult, object
       onObjectLoaded({ ...data, model_type: 'Depth Anything + OpenCV silhouette + Three.js closed visible-surface mesh' })
     } catch (err) { setError(err.name === 'AbortError' ? 'Reconstruction took too long. Try a smaller image or retry.' : (err.message || 'Object reconstruction failed.')) } finally { window.clearTimeout(timeout); setLoading(false) }
   }
-  useEffect(() => { if (!objectData || !mountRef.current) return; buildScene(); return destroyScene }, [objectData, depthScale, detail, showTexture, showWireframe, autoRotate, viewerBackground])
-
   function buildScene() {
     destroyScene()
     const element = mountRef.current; if (!element) return
@@ -137,6 +135,11 @@ export default function ObjectViewer({ fileId, uploadedFile, depthResult, object
     if (animation) cancelAnimationFrame(animation); if (resize) window.removeEventListener('resize', resize)
     geometry?.dispose(); materials?.forEach(material => { material.map?.dispose(); material.dispose() }); renderer?.dispose(); mountRef.current?.replaceChildren(); sceneRef.current = {}
   }
+  useEffect(() => {
+    if (!objectData || !mountRef.current) return undefined
+    buildScene()
+    return destroyScene
+  }, [objectData, depthScale, detail, showTexture, showWireframe, autoRotate, viewerBackground])
   function fullscreen() { mountRef.current?.requestFullscreen?.() }
   async function exportGlb() {
     const model = sceneRef.current.model
@@ -170,6 +173,7 @@ function ProviderModelViewer({ model }) {
   const mountRef = useRef(null)
   const runtime = useRef({})
   const [error, setError] = useState(null)
+  const [modelLoading, setModelLoading] = useState(true)
   const [wireframe, setWireframe] = useState(false)
   const [autoRotate, setAutoRotate] = useState(false)
   useEffect(() => {
@@ -181,12 +185,13 @@ function ProviderModelViewer({ model }) {
     scene.add(new THREE.HemisphereLight(0xc7dfff, 0x251242, 2.2)); const key = new THREE.DirectionalLight(0xffffff, 2.8); key.position.set(6, 10, 8); key.castShadow = true; scene.add(key); const fill = new THREE.PointLight(0x9b77ff, 35, 25); fill.position.set(-5, 2, 4); scene.add(fill)
     let loaded, wire
     const frame = target => { const box = new THREE.Box3().setFromObject(target); const centre = box.getCenter(new THREE.Vector3()); const size = box.getSize(new THREE.Vector3()); const distance = Math.max(size.x, size.y, size.z, 1) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) * 1.5; camera.position.set(centre.x + distance * .35, centre.y + distance * .15, centre.z + distance); controls.target.copy(centre); camera.lookAt(centre); controls.update() }
-    new GLTFLoader().load(model.model_url, gltf => { loaded = gltf.scene; loaded.traverse(node => { if (node.isMesh) { node.castShadow = true; node.receiveShadow = true } }); scene.add(loaded); if (wireframe) { wire = new THREE.Group(); loaded.traverse(node => { if (node.isMesh) wire.add(new THREE.LineSegments(new THREE.WireframeGeometry(node.geometry), new THREE.LineBasicMaterial({ color: 0xcab8ff, transparent: true, opacity: .25 }))) }); scene.add(wire) } frame(loaded); runtime.current.frame = frame }, undefined, () => setError('The generated GLB could not be loaded. Please regenerate the model.'))
+    setModelLoading(true)
+    new GLTFLoader().load(model.model_url, gltf => { loaded = gltf.scene; loaded.traverse(node => { if (node.isMesh) { node.castShadow = true; node.receiveShadow = true } }); scene.add(loaded); if (wireframe) { wire = new THREE.Group(); loaded.traverse(node => { if (node.isMesh) wire.add(new THREE.LineSegments(new THREE.WireframeGeometry(node.geometry), new THREE.LineBasicMaterial({ color: 0xcab8ff, transparent: true, opacity: .25 }))) }); scene.add(wire) } frame(loaded); runtime.current = { frame, loaded }; setModelLoading(false) }, undefined, () => { setModelLoading(false); setError('The generated GLB could not be loaded. Please regenerate the model.') })
     let animation; const animate = () => { animation = requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera) }; animate()
     const resize = () => { const w = host.clientWidth || 800, h = host.clientHeight || 520; camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h) }; window.addEventListener('resize', resize)
     runtime.current = { frame, loaded }
     return () => { cancelAnimationFrame(animation); window.removeEventListener('resize', resize); renderer.dispose(); host.replaceChildren() }
   }, [model.model_url, wireframe, autoRotate])
   function download() { const link = document.createElement('a'); link.href = model.model_url; link.download = 'depthwizard-text-to-3d.glb'; link.click() }
-  return <div className="object-workspace"><section className="card-panel object-controls"><div className="card-title"><h3><Sparkles size={18} /> Generated Text-to-3D Model</h3><span className="title-badge">PROVIDER GLB</span></div><p className="object-note">This is the validated GLB returned by the configured Text-to-3D provider. Use the same controls as every DepthWizard 3D result.</p><div className="terrain-controls"><label><input type="checkbox" checked={wireframe} onChange={event => setWireframe(event.target.checked)} /> Wireframe</label><label><input type="checkbox" checked={autoRotate} onChange={event => setAutoRotate(event.target.checked)} /> Auto rotate</label><button className="btn btn-secondary" onClick={() => runtime.current.loaded && runtime.current.frame?.(runtime.current.loaded)}><RotateCcw size={16} /> Reset view</button><button className="btn btn-secondary" onClick={() => mountRef.current?.requestFullscreen?.()}><Expand size={16} /> Fullscreen</button><button className="btn btn-secondary" onClick={download}><Download size={16} /> Download GLB</button></div></section>{error && <div className="state-box error"><AlertCircle size={30} /><h3>Model preview error</h3><p>{error}</p></div>}<div className="terrain-canvas-wrap object-canvas" ref={mountRef} /></div>
+  return <div className="object-workspace"><section className="card-panel object-controls"><div className="card-title"><h3><Sparkles size={18} /> Generated Text-to-3D Model</h3><span className="title-badge">VALIDATED GLB</span></div><p className="object-note">This is the validated GLB returned by the configured local/self-hosted engine. Use the same controls as every DepthWizard 3D result.</p><div className="terrain-controls"><label><input type="checkbox" checked={wireframe} onChange={event => setWireframe(event.target.checked)} /> Wireframe</label><label><input type="checkbox" checked={autoRotate} onChange={event => setAutoRotate(event.target.checked)} /> Auto rotate</label><button className="btn btn-secondary" onClick={() => runtime.current.loaded && runtime.current.frame?.(runtime.current.loaded)} disabled={modelLoading}><RotateCcw size={16} /> Reset view</button><button className="btn btn-secondary" onClick={() => mountRef.current?.requestFullscreen?.()}><Expand size={16} /> Fullscreen</button><button className="btn btn-secondary" onClick={download} disabled={modelLoading}><Download size={16} /> Download GLB</button></div></section>{modelLoading && <p className="pipeline-stage">Loading validated GLB into the 3D viewer…</p>}{error && <div className="state-box error"><AlertCircle size={30} /><h3>Model preview error</h3><p>{error}</p></div>}<div className="terrain-canvas-wrap object-canvas" ref={mountRef} /></div>
 }

@@ -40,13 +40,6 @@ export default function FlythroughPanel({ fileId, depthResult, terrainData, onTe
     } finally { window.clearTimeout(timeout); setLoading(false) }
   }
 
-  useEffect(() => {
-    if (!terrainData || !mountRef.current) return
-    buildScene(terrainData)
-    setStatus('Terrain ready. Press Start Flythrough.')
-    return disposeScene
-  }, [terrainData])
-
   function buildScene(data) {
     disposeScene()
     const host = mountRef.current
@@ -107,6 +100,13 @@ export default function FlythroughPanel({ fileId, depthResult, terrainData, onTe
     geometry?.dispose(); material?.map?.dispose(); material?.dispose(); renderer?.dispose()
     mountRef.current?.replaceChildren(); sceneRef.current = {}
   }
+
+  useEffect(() => {
+    if (!terrainData || !mountRef.current) return undefined
+    buildScene(terrainData)
+    setStatus('Terrain ready. Press Start Flythrough.')
+    return disposeScene
+  }, [terrainData])
 
   async function start() {
     const data = await loadTerrain()

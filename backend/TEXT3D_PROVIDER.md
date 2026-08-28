@@ -1,48 +1,41 @@
-# Text-to-3D provider configuration
+# Text-to-3D provider contract
 
-DepthWizard does not include a Text-to-3D model or provider account. To enable
-real generation, copy `.env.example` to `.env` in this `backend` folder and set:
+DepthWizard is provider-agnostic and does not include a provider account, API
+key, or fabricated model generator. Configure one compatible real Text-to-3D
+engine in `backend/.env`:
 
 ```dotenv
-TEXT3D_API_URL=https://your-provider.example/v1/generate
+TEXT3D_PROVIDER=generic_http
+TEXT3D_API_URL=https://your-provider.example/v1/text-to-3d
 TEXT3D_API_KEY=your-secret-key
+TEXT3D_STATUS_URL_TEMPLATE=https://your-provider.example/v1/jobs/{job_id}
 ```
 
-`TEXT3D_API_KEY` is sent only by the FastAPI backend as a Bearer token and is
-never returned to React. DepthWizard marks a provider ready only when both the
-provider URL and API key are set.
+`TEXT3D_STATUS_URL_TEMPLATE` is needed only if the provider does not return a
+`status_url` for queued jobs. Keep this file private; it is ignored by Git.
 
-## Required adapter contract
+## Request contract
 
-The configured URL receives a JSON POST body containing `prompt`,
-`enhanced_prompt`, `category`, `style`, `quality`, and `output_format: "glb"`.
-
-It may return a completed result:
+DepthWizard sends a JSON `POST` to `TEXT3D_API_URL` with:
 
 ```json
-{"status":"completed","model_url":"https://provider.example/model.glb"}
+{
+  "prompt": "enhanced prompt",
+  "original_prompt": "user prompt",
+  "category": "Vehicle",
+  "style": "Realistic",
+  "quality": "High",
+  "output_format": "glb"
+}
 ```
 
-Or an asynchronous response:
+The provider may respond immediately with `status: "completed"` plus one of
+`model_url`, `glb_url`, `download_url`, or `model_urls.glb`. For queued work it
+must return `status: "queued"`/`"processing"` and either a `status_url` or a
+`job_id` usable with the configured URL template.
 
-```json
-{"status":"queued","job_id":"abc","status_url":"https://provider.example/v1/jobs/abc"}
-```
-
-Status responses must eventually provide `status: "completed"` with
-`model_url` (or `glb_url` / `download_url`). DepthWizard downloads the result,
-checks the GLB header, stores it in `backend/models`, and serves it at
-`/models/<file>.glb`.
-
-## Optional preview → refinement flow
-
-If a provider supports separate preview and material/refinement operations, its
-completed preview response may include `refine_url`. DepthWizard posts the
-selected quality and `output_format: "glb"` to that URL, polls it using the
-same status contract, then validates the final model. Providers that return a
-final model in one generation job need no refinement URL.
-
-The generic adapter intentionally does not guess any commercial provider API.
-If your provider has a different request or polling contract, implement a small
-provider-specific adapter in `app/services/text3d_service.py`; React does not
-need to change.
+The downloaded output must be a GLB 2.0 file containing a mesh with position
+vertices. DepthWizard rejects invalid, empty, oversized, and non-GLB results;
+it never substitutes a placeholder model. A valid result is stored in
+`backend/models` and served to the existing viewer only through
+`GET /api/text3d/model/{filename}`.

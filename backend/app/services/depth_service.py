@@ -4,6 +4,14 @@ import numpy as np
 from PIL import Image
 import cv2
 from transformers import pipeline
+from huggingface_hub import snapshot_download
+
+
+MODEL_ID = "LiheYoung/depth-anything-small-hf"
+
+
+class DepthModelUnavailable(RuntimeError):
+    """Raised when the real depth model is not installed on this machine."""
 
 class DepthService:
     def __init__(self):
@@ -17,14 +25,28 @@ class DepthService:
         if self.pipe is None:
             # Detect device (0 for GPU, -1 for CPU)
             device = 0 if torch.cuda.is_available() else -1
-            print(f"[DepthService] Loading 'LiheYoung/depth-anything-small-hf' on device: {'GPU (CUDA)' if device == 0 else 'CPU'}")
-            
-            # Load pipeline
-            self.pipe = pipeline(
-                task="depth-estimation",
-                model="LiheYoung/depth-anything-small-hf",
-                device=device
-            )
+            print(f"[DepthService] Loading '{MODEL_ID}' on device: {'GPU (CUDA)' if device == 0 else 'CPU'}")
+
+            # Do not let a web request during an image operation hang the API.
+            # The model is a required local dependency, so locate a complete
+            # cached snapshot first and report a concrete installation command
+            # if it is absent.
+            try:
+                model_path = snapshot_download(repo_id=MODEL_ID, local_files_only=True)
+            except Exception as exc:
+                raise DepthModelUnavailable(
+                    f"Required depth model '{MODEL_ID}' is not installed locally. "
+                    "Install it once with internet access using: "
+                    "python -c \"from huggingface_hub import snapshot_download; "
+                    f"snapshot_download('{MODEL_ID}')\". Original check: {exc}"
+                ) from exc
+
+            try:
+                self.pipe = pipeline(task="depth-estimation", model=model_path, device=device)
+            except Exception as exc:
+                raise DepthModelUnavailable(
+                    f"The locally cached depth model '{MODEL_ID}' could not be loaded: {exc}"
+                ) from exc
             print("[DepthService] Model loaded successfully.")
 
     def run_depth_estimation(self, image_path: str, uploads_dir: str, file_id: str, ext: str):
@@ -104,7 +126,7 @@ class DepthService:
             "min_val": float(depth_min),
             "max_val": float(depth_max),
             "processing_time_sec": round(elapsed_time, 3),
-            "model_name": "LiheYoung/depth-anything-small-hf"
+            "model_name": MODEL_ID
         }
 
 # Singleton instance

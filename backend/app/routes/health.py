@@ -2,6 +2,7 @@ from fastapi import APIRouter
 import platform
 import time
 import sys
+from app.services.text3d_service import text3d_service
 
 router = APIRouter()
 
@@ -72,7 +73,9 @@ def get_health():
                     pass
 
     return {
-        "status": "healthy",
+        "status": "online",
+        "backend": "FastAPI",
+        "version": "1.0.0",
         "timestamp": time.time(),
         "platform": {
             "system": platform.system(),
@@ -87,5 +90,6 @@ def get_health():
             "gpu_available": gpu_available,
             "gpu_name": gpu_name,
             "gpu_details": gpu_details
-        }
+        },
+        "text3d": text3d_service.status()
     }

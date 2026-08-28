@@ -9,8 +9,10 @@ export default function DepthPanel({ fileId, uploadedFile, depthResult, mode = '
   async function runDepth() {
     if (!fileId) return
     setError(null); setLoading(true); setStage('Loading the local depth model and analysing the original image…')
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 120000)
     try {
-      const res = await fetch(`/api/process/${fileId}/depth`, { method: 'POST' })
+      const res = await fetch(`/api/process/${fileId}/depth`, { method: 'POST', signal: controller.signal })
       if (!res.ok) {
         const j = await res.json().catch(() => ({}))
         throw new Error(j.detail || 'Depth estimation failed.')
@@ -18,9 +20,10 @@ export default function DepthPanel({ fileId, uploadedFile, depthResult, mode = '
       const data = await res.json()
       onDepthDone(data); setStage('Depth map generated. The original image was not modified.')
     } catch (e) {
-      setError(e.message || 'An unexpected error occurred.')
+      setError(e.name === 'AbortError' ? 'Depth estimation exceeded two minutes. The local model may be loading or the image may be too large; retry after checking the backend message.' : (e.message || 'An unexpected error occurred.'))
       setStage('Depth estimation did not finish. Review the error and retry.')
     } finally {
+      window.clearTimeout(timeout)
       setLoading(false)
     }
   }

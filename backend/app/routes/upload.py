@@ -79,11 +79,15 @@ async def upload_image(file: UploadFile = File(...)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid image: {str(e)}")
         
     return {
+        "success": True,
         "file_id": file_id,
         "filename": filename,
         "stored_filename": stored_filename,
         "size_bytes": file_size,
+        "size": file_size,
+        "content_type": file.content_type or "application/octet-stream",
         "original_image_url": f"/uploads/{stored_filename}",
+        "url": f"/uploads/{stored_filename}",
         "width": width,
         "height": height,
         "message": "Image uploaded successfully."

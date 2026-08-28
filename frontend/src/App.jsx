@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Upload, Layers, Settings, Box, Play, BarChart2, Activity, Palette, Sparkles, PersonStanding, WandSparkles } from 'lucide-react'
+import { Upload, Layers, Settings, Box, Play, BarChart2, Activity, Palette, Sparkles, PersonStanding, WandSparkles, Crosshair, Aperture, History, LockKeyhole } from 'lucide-react'
 import UploadPanel from './components/UploadPanel'
 import DepthPanel from './components/DepthPanel'
 import CalibrationPanel from './components/CalibrationPanel'
@@ -10,16 +10,17 @@ import AuthDialog from './components/AuthDialog'
 import ObjectViewer from './components/ObjectViewer'
 import AppearanceDialog from './components/AppearanceDialog'
 import TextTo3DPanel from './components/TextTo3DPanel'
+import QueryPanel from './components/QueryPanel'
 import './App.css'
 
 const TERRAIN_MENU = [
   { key: 'upload', label: 'Upload Image', icon: Upload }, { key: 'depth', label: 'Depth Analysis', icon: Layers },
   { key: 'calibration', label: 'Calibration', icon: Settings }, { key: 'terrain', label: '3D Terrain', icon: Box },
-  { key: 'flythrough', label: 'Flythrough', icon: Play }, { key: 'analytics', label: 'Project Analytics', icon: BarChart2 },
+  { key: 'flythrough', label: 'Flythrough', icon: Play }, { key: 'query', label: 'Query', icon: Crosshair }, { key: 'analytics', label: 'Project Analytics', icon: BarChart2 },
 ]
 const MESH_MENU = [
   { key: 'upload', label: 'Image Inputs', icon: Upload }, { key: 'depth', label: 'Depth Analysis', icon: Layers },
-  { key: 'object', label: '3D Reconstruction', icon: Box }, { key: 'analytics', label: 'Project Analytics', icon: BarChart2 },
+  { key: 'object', label: '3D Reconstruction', icon: Box }, { key: 'query', label: 'Query', icon: Crosshair }, { key: 'analytics', label: 'Project Analytics', icon: BarChart2 },
 ]
 const MODES = [
   { key: 'terrain', label: '3D Terrain', icon: Box, tab: 'terrain', description: 'Aerial and map imagery' },
@@ -28,7 +29,12 @@ const MODES = [
   { key: 'anime', label: '3D Character', icon: WandSparkles, tab: 'object', description: 'Anime and stylized art' },
   { key: 'text', label: 'Text to 3D', icon: Layers, tab: 'text', description: 'Requires a configured model' },
 ]
-const TITLES = { upload: 'Image Inputs', depth: 'Depth Analysis', calibration: 'Elevation Calibration', terrain: '3D Terrain Viewer', flythrough: '3D Flythrough Mode', analytics: 'Project Analytics', object: '3D Reconstruction', text: 'Text to 3D' }
+const TITLES = { upload: 'Image Inputs', depth: 'Depth Analysis', calibration: 'Elevation Calibration', terrain: '3D Terrain Viewer', flythrough: '3D Flythrough Mode', query: 'Point Query', analytics: 'Project Analytics', object: '3D Reconstruction', text: 'Text to 3D' }
+
+function readHistory(email) {
+  if (!email) return []
+  try { return JSON.parse(localStorage.getItem(`depthvision-history:${email}`)) || [] } catch { return [] }
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('upload')
@@ -48,14 +54,10 @@ export default function App() {
   const [showAuth, setShowAuth] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
   const [showAppearance, setShowAppearance] = useState(false)
-  const [history, setHistory] = useState([])
+  const [history, setHistory] = useState(() => readHistory(profile?.email))
   const [theme, setTheme] = useState(() => localStorage.getItem('depthvision-theme') || 'midnight')
 
   useEffect(() => { localStorage.setItem('depthvision-theme', theme) }, [theme])
-  useEffect(() => {
-    if (!profile?.email) { setHistory([]); return }
-    try { setHistory(JSON.parse(localStorage.getItem(`depthvision-history:${profile.email}`)) || []) } catch { setHistory([]) }
-  }, [profile])
   useEffect(() => {
     const controller = new AbortController()
     fetch('/api/health', { signal: controller.signal })
@@ -65,8 +67,8 @@ export default function App() {
     return () => controller.abort()
   }, [])
 
-  function saveProfile(nextProfile) { localStorage.setItem('depthvision-profile', JSON.stringify(nextProfile)); setProfile(nextProfile); setShowAuth(false) }
-  function signOut() { localStorage.removeItem('depthvision-profile'); setProfile(null); setShowHistory(false) }
+  function saveProfile(nextProfile) { localStorage.setItem('depthvision-profile', JSON.stringify(nextProfile)); setProfile(nextProfile); setHistory(readHistory(nextProfile.email)); setShowAuth(false) }
+  function signOut() { localStorage.removeItem('depthvision-profile'); setProfile(null); setHistory([]); setShowHistory(false) }
   function saveProjectToHistory(info = uploadedFile, type = reconstructionMode, metadata = {}) {
     if (!profile?.email || !info?.fileId) return
     const key = `depthvision-history:${profile.email}`
@@ -91,11 +93,24 @@ export default function App() {
 
   return <div className="dashboard-container" data-theme={theme}>
     <aside className="sidebar">
-      <div className="sidebar-logo"><h1>3D DepthVision</h1><span>SIH26175 · SINGLE-VIEW DEPTH & FLYTHROUGH</span></div>
+      <div className="sidebar-logo"><div className="brand-lockup"><span className="brand-mark" aria-hidden="true"><Aperture size={23} /><i /></span><h1>3D DepthVision</h1></div></div>
       <div className="mode-picker" aria-label="Reconstruction mode">
         {MODES.map(({ key, label, icon: Icon, description, ...mode }) => <button key={key} className={reconstructionMode === key ? 'selected' : ''} onClick={() => selectMode({ key, ...mode })} title={description}><Icon size={15} /><span>{label}</span></button>)}
       </div>
-      <ul className="sidebar-menu">{menu.map(({ key, label, icon: Icon }) => <li key={key} className={`menu-item ${activeTab === key ? 'active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={18} />{label}</li>)}</ul>
+      <ul className="sidebar-menu">{menu.map(({ key, label, icon: Icon }) => <li key={key} className={`menu-item ${activeTab === key ? 'active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={18} />{label}</li>)}
+        <li className="sidebar-history-card">
+          <div className="rail-card-title"><History size={17} /><span>History</span></div>
+          {profile ? <>
+            <p className="rail-history-owner">Saved for {profile.name}</p>
+            {history.length ? <div className="rail-history-list">{history.slice(0, 3).map(item => <button key={item.id} className="rail-history-item" onClick={() => setShowHistory(true)} title={`View ${item.filename} history`}><strong>{item.filename}</strong><span>{item.type} · {new Date(item.createdAt).toLocaleDateString()}</span></button>)}</div> : <p className="rail-history-empty">No saved reconstructions yet.</p>}
+            <button className="rail-history-action" onClick={() => setShowHistory(true)}>View history</button>
+          </> : <>
+            <LockKeyhole className="rail-lock" size={20} aria-hidden="true" />
+            <p className="rail-history-empty">Your saved projects appear here after you sign in.</p>
+            <button className="rail-history-action" onClick={() => setShowAuth(true)}>Login to show history</button>
+          </>}
+        </li>
+      </ul>
       <div className="sidebar-footer"><div className="meta-list">
         <div className="meta-row"><span className="meta-label">Input</span><span className={`meta-value ${uploadedFile ? 'highlight' : ''}`}>{uploadedFile ? 'Loaded' : '—'}</span></div>
         <div className="meta-row"><span className="meta-label">Depth</span><span className={`meta-value ${depthResult ? 'highlight' : ''}`}>{depthResult ? 'Ready' : '—'}</span></div>
@@ -104,10 +119,10 @@ export default function App() {
     </aside>
     <div className="main-workspace">
       <header className="main-header"><div className="header-title"><p className="header-mode">{currentMode?.label}</p><h2>{title}</h2></div><div className="header-status">
-        <div className="connection-badge"><span className={`badge-dot ${backendOk ? 'connected' : ''}`} />{backendOk === null ? 'Connecting…' : backendOk ? 'Backend Online' : 'Backend Offline'}</div>
+        <div className="connection-badge" title={backendOk === false ? 'Unable to connect to the FastAPI backend at http://127.0.0.1:8000. Run backend/start-backend.ps1.' : undefined}><span className={`badge-dot ${backendOk ? 'connected' : ''}`} />{backendOk === null ? 'Connecting…' : backendOk ? 'Backend Online' : 'Backend Offline'}</div>
         {backendInfo?.hardware && <div className="connection-badge"><Activity size={13} />{backendInfo.hardware.gpu_available ? `GPU: ${backendInfo.hardware.gpu_name}` : 'Automatic compute'}</div>}
         <button className="header-action" onClick={() => setShowAppearance(true)} title="Appearance"><Palette size={14} /> Appearance</button>
-        {profile ? <><button className="header-action" onClick={() => setShowHistory(true)}>History</button><button className="header-action profile-action" onClick={signOut}>{profile.name}</button></> : <button className="header-action primary-action" onClick={() => setShowAuth(true)}>Sign in</button>}
+        {profile ? <button className="header-action profile-action" onClick={signOut}>{profile.name}</button> : <button className="header-action primary-action" onClick={() => setShowAuth(true)}>Sign in</button>}
       </div></header>
       <main className="content-area">
         {activeTab === 'upload' && <UploadPanel mode={reconstructionMode} onUploaded={resetForNewImage} fileId={fileId} uploadedFile={uploadedFile} inputAnalysis={inputAnalysis} onInputAnalysis={setInputAnalysis} inputViews={inputViews} onInputViewsChange={setInputViews} />}
@@ -115,6 +130,7 @@ export default function App() {
         {activeTab === 'calibration' && <CalibrationPanel fileId={fileId} uploadedFile={uploadedFile} depthResult={depthResult} calibResult={calibResult} onCalibDone={result => { setCalibResult(result); setTerrainData(null) }} />}
         {activeTab === 'terrain' && <TerrainViewer fileId={fileId} depthResult={depthResult} terrainData={terrainData} onTerrainLoaded={completeTerrain} onPointClick={(x, y) => { const scaleX = uploadedFile?.width / Math.max((terrainData?.grid_size ?? 1) - 1, 1); const scaleY = uploadedFile?.height / Math.max((terrainData?.grid_size ?? 1) - 1, 1); setAnalyticsData({ x: Math.min(uploadedFile?.width - 1, Math.max(0, Math.round(x * scaleX))), y: Math.min(uploadedFile?.height - 1, Math.max(0, Math.round(y * scaleY))), fileId }) }} onSave={() => saveProjectToHistory(uploadedFile, 'terrain')} canSave={Boolean(profile)} />}
         {activeTab === 'flythrough' && <FlythroughPanel fileId={fileId} depthResult={depthResult} terrainData={terrainData} onTerrainLoaded={completeTerrain} onExit={() => setActiveTab('terrain')} />}
+        {activeTab === 'query' && <QueryPanel fileId={fileId} uploadedFile={uploadedFile} initialPoint={analyticsData} />}
         {activeTab === 'object' && <ObjectViewer fileId={fileId} uploadedFile={uploadedFile} depthResult={depthResult} objectData={objectData} mode={reconstructionMode} inputViews={inputViews} onObjectLoaded={completeObject} onSave={() => saveProjectToHistory(uploadedFile, reconstructionMode)} canSave={Boolean(profile)} />}
         {activeTab === 'text' && <TextTo3DPanel />}
         {activeTab === 'analytics' && <AnalyticsPanel fileId={fileId} uploadedFile={uploadedFile} depthResult={depthResult} initialPoint={analyticsData} objectData={objectData} terrainData={terrainData} inputAnalysis={inputAnalysis} history={history} reconstructionMode={reconstructionMode} inputViewCount={Object.keys(inputViews).length || 1} onSave={() => saveProjectToHistory(uploadedFile, reconstructionMode)} canSave={Boolean(profile)} />}

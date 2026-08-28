@@ -1,11 +1,14 @@
+import os
+from app.config import load_backend_env
+
+# Environment must be loaded before importing routes/services: Text-to-3D
+# selects its configured engine during module import.
+load_backend_env()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes import health, upload, process
 from fastapi.staticfiles import StaticFiles
-import os
-from app.config import load_backend_env
-
-load_backend_env()
 
 # Initialize the FastAPI app
 app = FastAPI(
@@ -18,8 +21,8 @@ app = FastAPI(
 # Allows the React frontend running on local ports (e.g. 5173) to communicate with the FastAPI backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Using wildcard for development; restrict in production
-    allow_credentials=True,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
+<<<<<<< Updated upstream
 import { Activity, Aperture, BarChart2, Box, Crosshair, History, Home, Image, Layers, LockKeyhole, Map, Palette, PersonStanding, Play, Settings, Type } from 'lucide-react'
+=======
+import { Upload, Layers, Settings, Box, Play, BarChart2, Activity, Palette, Sparkles, PersonStanding, WandSparkles, Crosshair, History, CircleHelp, Info, Mail } from 'lucide-react'
+>>>>>>> Stashed changes
 import UploadPanel from './components/UploadPanel'
 import DepthPanel from './components/DepthPanel'
 import CalibrationPanel from './components/CalibrationPanel'
@@ -46,13 +50,35 @@ export default function App() {
   const [characterStyle, setCharacterStyle] = useState('Realistic')
   const [profile, setProfile] = useState(() => { try { return JSON.parse(localStorage.getItem('depthvision-profile')) } catch { return null } })
   const [showAuth, setShowAuth] = useState(false)
+  const [authPurpose, setAuthPurpose] = useState('general')
   const [showHistory, setShowHistory] = useState(false)
   const [showAppearance, setShowAppearance] = useState(false)
   const [history, setHistory] = useState(() => readHistory(profile?.email))
   const [theme, setTheme] = useState(() => localStorage.getItem('depthvision-theme') || 'midnight')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
 
+<<<<<<< Updated upstream
   useEffect(() => { localStorage.setItem('depthvision-theme', theme) }, [theme])
   useEffect(() => { const controller = new AbortController(); fetch('/api/health', { signal: controller.signal }).then(async response => { if (!response.ok) throw new Error('Health check failed'); return response.json() }).then(data => { setBackendOk(true); setBackendInfo(data) }).catch(error => { if (error.name !== 'AbortError') setBackendOk(false) }); return () => controller.abort() }, [])
+=======
+  useEffect(() => {
+    localStorage.setItem('depthvision-theme', theme)
+    // Theme variables are scoped to the dashboard. Mirror its background onto
+    // the document canvas so no default black strip appears below the app.
+    const dashboard = document.querySelector('.dashboard-container')
+    const background = dashboard ? getComputedStyle(dashboard).getPropertyValue('--bg-color').trim() : ''
+    document.documentElement.style.backgroundColor = background
+    document.body.style.backgroundColor = background
+  }, [theme])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/health', { signal: controller.signal })
+      .then(async response => { if (!response.ok) throw new Error('Health check failed'); return response.json() })
+      .then(data => { setBackendOk(true); setBackendInfo(data) })
+      .catch(error => { if (error.name !== 'AbortError') setBackendOk(false) })
+    return () => controller.abort()
+  }, [])
+>>>>>>> Stashed changes
 
   function saveProfile(nextProfile) { localStorage.setItem('depthvision-profile', JSON.stringify(nextProfile)); setProfile(nextProfile); setHistory(readHistory(nextProfile.email)); setShowAuth(false) }
   function signOut() { localStorage.removeItem('depthvision-profile'); setProfile(null); setHistory([]); setShowHistory(false) }
@@ -66,6 +92,7 @@ export default function App() {
   function completeObject(data) { setObjectData(data) }
   function completeTerrain(data) { setTerrainData(data) }
 
+<<<<<<< Updated upstream
   const isText = reconstructionMode === 'text'; const menu = reconstructionMode === 'terrain' ? TERRAIN_MENU : RECONSTRUCTION_MENU; const title = activeTab === 'object' ? `${modeLabel(reconstructionMode)} Viewer` : TITLES[activeTab]
   return <div className="dashboard-container" data-theme={theme}>
     <aside className="sidebar"><button className="sidebar-logo" onClick={() => setActiveTab('home')}><div className="brand-lockup"><span className="brand-mark" aria-hidden="true"><Aperture size={23} /><i /></span><h1>3D DepthVision</h1></div></button>
@@ -80,5 +107,40 @@ export default function App() {
     </div>
     <AuthDialog open={showAuth} onClose={() => setShowAuth(false)} onSave={saveProfile} /><AppearanceDialog open={showAppearance} theme={theme} onSelect={setTheme} onClose={() => setShowAppearance(false)} />
     {showHistory && <div className="modal-backdrop" onMouseDown={() => setShowHistory(false)}><section className="auth-dialog history-dialog" onMouseDown={event => event.stopPropagation()}><button className="modal-close" onClick={() => setShowHistory(false)} aria-label="Close history">×</button><p className="eyebrow">SAVED PROJECT HISTORY</p><h3>Saved projects</h3>{history.length ? <div className="history-list">{history.map(item => <div className="history-item" key={item.id}><div><strong>{item.text || item.filename}</strong><span>{modeLabel(item.type)} · {item.status || 'Saved'} · {new Date(item.createdAt).toLocaleString()}</span></div><aside><button onClick={() => openHistoryItem(item)}>View</button><button onClick={() => renameHistory(item.id)}>Rename</button><button className="danger" onClick={() => deleteHistory(item.id)}>Delete</button></aside></div>)}</div> : <p className="dialog-copy">Save a generated model or project to add it here. Uploading or only viewing a result never saves it automatically.</p>}</section></div>}
+=======
+  return <div className={`dashboard-container ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} data-theme={theme}>
+    <aside className="sidebar" onMouseEnter={() => setSidebarCollapsed(false)} onMouseLeave={() => setSidebarCollapsed(true)}>
+      <div className="sidebar-logo"><div className="brand-lockup"><img className="brand-logo-image" src="/depthvision-logo.png" alt="3D DepthVision" /><h1>3D DepthVision</h1></div></div>
+      <div className="mode-picker" aria-label="Reconstruction mode">
+        {MODES.map(({ key, label, icon: Icon, description, ...mode }) => <button key={key} className={reconstructionMode === key ? 'selected' : ''} onClick={() => selectMode({ key, ...mode })} title={description}><Icon size={15} /><span>{label}</span></button>)}
+      </div>
+      <ul className="sidebar-menu">{menu.map(({ key, label, icon: Icon }) => <li key={key} title={label} className={`menu-item ${activeTab === key ? 'active' : ''}`} onClick={() => setActiveTab(key)}><Icon size={18} /><span>{label}</span></li>)}
+        <li className="sidebar-history-option"><button title="History" onClick={() => { if (profile) setShowHistory(true); else { setAuthPurpose('history'); setShowAuth(true) } }}><History size={18} /><span>History</span></button></li>
+      </ul>
+      <div className="sidebar-footer"><nav className="sidebar-support" aria-label="Support links"><a href="#help" title="Help Center"><CircleHelp size={15} /> <span>Help Center</span></a><a href="#about" title="About Us"><Info size={15} /> <span>About Us</span></a><a href="mailto:support@3ddepthvision.local" title="Contact"><Mail size={15} /> <span>Contact</span></a></nav></div>
+    </aside>
+    <div className="main-workspace">
+      <header className="main-header"><div className="header-title"><p className="header-mode">{currentMode?.label}</p><h2>{title}</h2></div><div className="header-status">
+        <div className="connection-badge" title={backendOk === false ? 'Unable to connect to the FastAPI backend at http://127.0.0.1:8000. Run backend/start-backend.ps1.' : undefined}><span className={`badge-dot ${backendOk ? 'connected' : ''}`} />{backendOk === null ? 'Connecting…' : backendOk ? 'Backend Online' : 'Backend Offline'}</div>
+        {backendInfo?.hardware && <div className="connection-badge"><Activity size={13} />{backendInfo.hardware.gpu_available ? `GPU: ${backendInfo.hardware.gpu_name}` : 'Automatic compute'}</div>}
+        <button className="header-action" onClick={() => setShowAppearance(true)} title="Appearance"><Palette size={14} /> Appearance</button>
+        {profile ? <button className="header-action profile-action" onClick={signOut}>{profile.name}</button> : <button className="header-action primary-action" onClick={() => { setAuthPurpose('general'); setShowAuth(true) }}>Sign in</button>}
+      </div></header>
+      <main className="content-area">
+        {activeTab === 'upload' && <UploadPanel mode={reconstructionMode} onUploaded={resetForNewImage} fileId={fileId} uploadedFile={uploadedFile} inputAnalysis={inputAnalysis} onInputAnalysis={setInputAnalysis} inputViews={inputViews} onInputViewsChange={setInputViews} />}
+        {activeTab === 'depth' && <DepthPanel fileId={fileId} uploadedFile={uploadedFile} depthResult={depthResult} mode={reconstructionMode} inputViewCount={Object.keys(inputViews).length || 1} onDepthDone={result => { setDepthResult(result); setTerrainData(null); setObjectData(null) }} />}
+        {activeTab === 'calibration' && <CalibrationPanel fileId={fileId} uploadedFile={uploadedFile} depthResult={depthResult} calibResult={calibResult} onCalibDone={result => { setCalibResult(result); setTerrainData(null) }} />}
+        {activeTab === 'terrain' && <TerrainViewer fileId={fileId} depthResult={depthResult} terrainData={terrainData} onTerrainLoaded={completeTerrain} onPointClick={(x, y) => setAnalyticsData({ x: Math.min(uploadedFile?.width - 1, Math.max(0, Math.round(x))), y: Math.min(uploadedFile?.height - 1, Math.max(0, Math.round(y))), fileId })} onSave={() => saveProjectToHistory(uploadedFile, 'terrain')} canSave={Boolean(profile)} />}
+        {activeTab === 'flythrough' && <FlythroughPanel fileId={fileId} depthResult={depthResult} terrainData={terrainData} onTerrainLoaded={completeTerrain} onExit={() => setActiveTab('terrain')} />}
+        {activeTab === 'query' && <QueryPanel fileId={fileId} uploadedFile={uploadedFile} initialPoint={analyticsData} />}
+        {activeTab === 'object' && <ObjectViewer fileId={fileId} uploadedFile={uploadedFile} depthResult={depthResult} objectData={objectData} mode={reconstructionMode} inputViews={inputViews} onObjectLoaded={completeObject} onSave={() => saveProjectToHistory(uploadedFile, reconstructionMode)} canSave={Boolean(profile)} />}
+        {activeTab === 'text' && <TextTo3DPanel />}
+        {activeTab === 'analytics' && <AnalyticsPanel fileId={fileId} uploadedFile={uploadedFile} depthResult={depthResult} initialPoint={analyticsData} objectData={objectData} terrainData={terrainData} inputAnalysis={inputAnalysis} history={history} reconstructionMode={reconstructionMode} inputViewCount={Object.keys(inputViews).length || 1} onSave={() => saveProjectToHistory(uploadedFile, reconstructionMode)} canSave={Boolean(profile)} />}
+      </main>
+    </div>
+    <AuthDialog open={showAuth} purpose={authPurpose} onClose={() => setShowAuth(false)} onSave={saveProfile} />
+    <AppearanceDialog open={showAppearance} theme={theme} onSelect={setTheme} onClose={() => setShowAppearance(false)} />
+    {showHistory && <div className="modal-backdrop" onMouseDown={() => setShowHistory(false)}><section className="auth-dialog history-dialog" onMouseDown={event => event.stopPropagation()}><button className="modal-close" onClick={() => setShowHistory(false)} aria-label="Close history">×</button><p className="eyebrow">SAVED PROJECT HISTORY</p><h3>Completed reconstructions</h3>{history.length ? <div className="history-list">{history.map(item => <div className="history-item" key={item.id}><strong>{item.filename}</strong><span>{item.type} · {item.width} × {item.height}px · {item.inputViewCount || 1} view(s) · {new Date(item.createdAt).toLocaleString()}</span></div>)}</div> : <p className="dialog-copy">Completed reconstructions and manually saved projects appear here after you sign in.</p>}</section></div>}
+>>>>>>> Stashed changes
   </div>
 }

@@ -164,7 +164,9 @@ h1, h2, h3, h4, h5, h6 {
   flex: 1;
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  min-height: 100dvh;
+  height: auto;
+  background: var(--workspace-gradient);
   overflow-y: auto;
   position: relative;
 }

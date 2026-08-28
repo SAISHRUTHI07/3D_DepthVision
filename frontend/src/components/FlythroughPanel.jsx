@@ -55,12 +55,13 @@ export default function FlythroughPanel({ fileId, depthResult, terrainData, onTe
     const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true
     scene.add(new THREE.HemisphereLight(0xbbefff, 0x13231d, 1.6))
     const sun = new THREE.DirectionalLight(0xfff2d6, 2.4); sun.position.set(130, 220, 120); sun.castShadow = true; scene.add(sun)
-    const n = data.grid_size; const elevation = data.elevation_grid; const min = finite(data.stats?.elevation_min); const range = Math.max(finite(data.stats?.elevation_max) - min, .00001)
-    const geometry = new THREE.PlaneGeometry(220, 220, n - 1, n - 1); geometry.rotateX(-Math.PI / 2)
+    const n = data.grid_size; const elevation = data.elevation_grid; const min = finite(data.stats?.visual_min ?? data.stats?.elevation_min); const range = Math.max(finite(data.stats?.visual_max ?? data.stats?.elevation_max) - min, .00001)
+    const sourceAspect = Math.max(1, data.source_width || n) / Math.max(1, data.source_height || n)
+    const geometry = new THREE.PlaneGeometry(220, 220 / sourceAspect, n - 1, n - 1); geometry.rotateX(-Math.PI / 2)
     const position = geometry.attributes.position; const colours = new Float32Array(position.count * 3)
     for (let i = 0; i < position.count; i++) {
       const normalized = THREE.MathUtils.clamp((finite(elevation[i]) - min) / range, 0, 1)
-      position.setY(i, normalized * 92)
+      position.setY(i, normalized * 42)
       colours[i * 3] = .09 + normalized * .45; colours[i * 3 + 1] = .24 + normalized * .48; colours[i * 3 + 2] = .32 + normalized * .42
     }
     position.needsUpdate = true; geometry.computeVertexNormals(); geometry.setAttribute('color', new THREE.BufferAttribute(colours, 3))

@@ -55,3 +55,23 @@ def downsample_grid(grid: np.ndarray, target_size: int) -> np.ndarray:
     Uses INTER_AREA interpolation, which is ideal for decimation/downsampling.
     """
     return cv2.resize(grid, (target_size, target_size), interpolation=cv2.INTER_AREA)
+
+
+def smooth_terrain_grid(elevation_map: np.ndarray) -> np.ndarray:
+    """Remove isolated monocular-depth artifacts without erasing terrain relief.
+
+    A small median pass removes one-pixel spikes/holes. A bilateral pass then
+    smooths within regions while keeping real elevation boundaries. The final
+    low-weight Gaussian blend makes adjacent mesh vertices transition smoothly
+    after downsampling, rather than creating the cloth-like look caused by
+    noisy relative-depth predictions.
+    """
+    terrain = np.asarray(elevation_map, dtype=np.float32)
+    if terrain.ndim != 2 or terrain.size == 0:
+        raise ValueError("Terrain elevation must be a non-empty 2D array")
+    if float(np.ptp(terrain)) < 1e-6:
+        return terrain.copy()
+    median = cv2.medianBlur(terrain, 3)
+    bilateral = cv2.bilateralFilter(median, 7, 12, 5)
+    soft = cv2.GaussianBlur(bilateral, (0, 0), 0.85)
+    return (bilateral * .78 + soft * .22).astype(np.float32)

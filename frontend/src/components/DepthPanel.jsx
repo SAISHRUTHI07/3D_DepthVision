@@ -105,8 +105,8 @@ export default function DepthPanel({ fileId, uploadedFile, depthResult, mode = '
               <img src={uploadedFile.localUrl} alt="Original" />
             </div>
             <div className="img-panel">
-              <label>Depth Map (Viridis)</label>
-              <img src={depthResult.visual_depth_url} alt="Depth map" />
+              <label>Full-frame Depth Map (Viridis)</label>
+              <img src={depthResult.visual_depth_url} alt="Full-frame depth map aligned to the uploaded image" />
             </div>
           </div>
 
@@ -133,7 +133,7 @@ export default function DepthPanel({ fileId, uploadedFile, depthResult, mode = '
                 </div>
                 <div className="meta-row">
                   <span className="meta-label">Depth Range</span>
-                  <span className="meta-value">{depthResult.min_val?.toFixed(2)} → {depthResult.max_val?.toFixed(2)}</span>
+                  <span className="meta-value">{depthResult.visual_min_val?.toFixed(2) ?? depthResult.min_val?.toFixed(2)} → {depthResult.visual_max_val?.toFixed(2) ?? depthResult.max_val?.toFixed(2)}</span>
                 </div>
               </div>
             </div>

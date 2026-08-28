@@ -1,4 +1,30 @@
-# Text-to-3D provider contract
+# Text-to-3D providers
+
+## Tripo Text-to-3D (concrete integration)
+
+DepthWizard includes a server-side integration for Tripo's real asynchronous
+Text-to-3D API. Create an API key in the Tripo platform and put it only in
+`backend/.env`:
+
+```dotenv
+TEXT3D_PROVIDER=tripo
+TRIPO_API_KEY=your-tripo-secret
+TRIPO_API_BASE_URL=https://openapi.tripo3d.ai/v3
+TRIPO_MODEL_VERSION=v3.1-20260211
+TRIPO_TIMEOUT_SECONDS=900
+TRIPO_POLL_SECONDS=3
+```
+
+The adapter submits `POST /generation/text-to-model` with `prompt` and
+`model`, polls `GET /tasks/{task_id}`, downloads the completed
+`data.output.model_url` immediately, validates that it is a non-empty GLB 2.0
+mesh, and stores it in
+`backend/generated_models`. It never creates fallback geometry.
+
+For the provider contract and account setup, use the official Tripo docs:
+https://developers.tripo3d.ai/en/docs/generation-text-to-model/standard
+
+## Generic provider contract
 
 DepthWizard is provider-agnostic and does not include a provider account, API
 key, or fabricated model generator. Configure one compatible real Text-to-3D

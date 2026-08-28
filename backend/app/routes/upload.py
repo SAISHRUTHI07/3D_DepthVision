@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 import os
 import uuid
 import shutil
@@ -17,11 +17,25 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 MAX_IMAGE_PIXELS = 50_000_000
 
 @router.post("/upload")
-async def upload_image(file: UploadFile = File(...)):
+async def upload_image(
+    file: UploadFile = File(...),
+    input_type: str = Form("single"),
+    view_label: str = Form("Unknown / Auto-detect view"),
+):
     """
     Upload an RGB/satellite/aerial image.
     Validates file extension and size (max 10MB).
     """
+    # Keep viewpoint metadata explicit: a single image is an unknown camera
+    # viewpoint, never implicitly a "front" image.  The current local depth
+    # pipeline still processes one selected image at a time; multi-view clients
+    # can upload their set with optional labels without being misrepresented as
+    # fused geometry.
+    if input_type not in {"single", "multi_view"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="input_type must be 'single' or 'multi_view'.")
+    if len(view_label.strip()) > 64:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="View label must be 64 characters or fewer.")
+
     # 1. Validate Extension
     filename = file.filename
     _, ext = os.path.splitext(filename.lower())
@@ -90,5 +104,7 @@ async def upload_image(file: UploadFile = File(...)):
         "url": f"/uploads/{stored_filename}",
         "width": width,
         "height": height,
+        "input_type": input_type,
+        "view_label": view_label.strip() or "Unknown / Auto-detect view",
         "message": "Image uploaded successfully."
     }

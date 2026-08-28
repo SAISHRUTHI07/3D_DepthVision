@@ -1,89 +1,37 @@
-import { useRef, useState } from 'react'
-import { AlertCircle, CheckCircle, Image, Plus, Trash2, UploadCloud, View } from 'lucide-react'
+import { useMemo, useRef, useState } from 'react'
+import { AlertCircle, ArrowDown, ArrowUp, CheckCircle, Plus, Replace, Trash2, UploadCloud, View } from 'lucide-react'
 
-const ALLOWED = ['image/jpeg', 'image/png']
-const MAX_MB = 10
-const VIEW_SLOTS = [
-  ['front', 'Front', true], ['back', 'Back', false], ['left', 'Left', false], ['right', 'Right', false], ['top', 'Top', false], ['bottom', 'Bottom', false],
-]
-const MODE_HELP = {
-  terrain: ['Upload a clear aerial, satellite, map, or drone image.', 'One image is the correct input for the terrain pipeline.'],
-  object: ['Use a well-lit building or object photo with the subject clearly visible.', 'One photo creates a textured visible-surface mesh. Extra angles are recommended for future multi-view reconstruction.'],
-  human: ['Use a full-body or upper-body photograph with the person separated from the background.', 'One photo creates only the visible surface. Front, left, and right images improve future multi-view reconstruction.'],
-  anime: ['Use a clean, full-character anime, cartoon, or game-style image.', 'One image supports stylized visible-surface geometry; hidden hair, clothing, and back details cannot be measured from it.'],
+const ALLOWED = ['image/jpeg', 'image/png']; const MAX_MB = 10
+const MODE_COPY = {
+  terrain: { eyebrow: '3D TERRAIN INPUT', title: 'Upload geographic imagery', body: 'Best for landscapes, elevation, terrain, roads, fields, and geographic surfaces. Use one aerial, satellite, drone, or topographic image.', label: 'Terrain image', allowMulti: false },
+  object: { eyebrow: '3D OBJECT INPUT', title: 'Upload an object from any angle', body: 'A single image is treated as an unknown viewpoint—not as a front image. Multiple useful views improve reconstruction accuracy.', label: 'Object image', allowMulti: true },
+  character: { eyebrow: '3D CHARACTER INPUT', title: 'Upload a portrait or full-body image', body: 'A single human image can create a visible-surface reconstruction. Add other angles when you need more complete character geometry.', label: 'Character image', allowMulti: true },
+  scene: { eyebrow: '3D IMAGE / SCENE INPUT', title: 'Upload an image with spatial depth', body: 'Use any general image. If some areas cannot be reconstructed reliably from one view, add another angle for a better spatial result.', label: 'Scene image', allowMulti: true },
 }
-
+const VIEW_LABELS = ['Unknown / Auto-detect view', 'Front', 'Back', 'Left', 'Right', 'Top', 'Bottom']
 function sameFile(a, b) { return a && b && a.name === b.name && a.size === b.size && a.lastModified === b.lastModified }
 function imageDimensions(url) { return new Promise(resolve => { const image = new window.Image(); image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight }); image.onerror = () => resolve({ width: 0, height: 0 }); image.src = url }) }
-function hasSupportedExtension(file) { return /\.(jpe?g|png)$/i.test(file?.name || '') }
-function describeUploadFailure(error) {
-  if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return 'Upload timed out while waiting for the backend. Confirm FastAPI is running on http://127.0.0.1:8000 and retry.'
-  if (error instanceof TypeError && /fetch|network|load/i.test(error.message || '')) return 'Cannot connect to the upload backend at http://127.0.0.1:8000. Start the FastAPI server, then retry.'
-  return error?.message || 'Upload failed for an unknown reason.'
-}
+function describe(error) { if (error?.name === 'AbortError' || error?.name === 'TimeoutError') return 'Upload timed out. Confirm FastAPI is running on port 8000, then retry.'; if (error instanceof TypeError) return 'Backend is offline or the frontend proxy cannot reach port 8000.'; return error?.message || 'Upload failed for an unknown reason.' }
 
-export default function UploadPanel({ mode = 'terrain', onUploaded, uploadedFile, inputAnalysis, onInputAnalysis, inputViews = {}, onInputViewsChange }) {
-  const primaryInputRef = useRef(null)
-  const extraInputRefs = useRef({})
-  const [dragOver, setDragOver] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [viewLoading, setViewLoading] = useState('')
-  const [error, setError] = useState(null)
-  const [pendingPreview, setPendingPreview] = useState(null)
-  const isMultiView = mode !== 'terrain' && mode !== 'text'
-  const help = MODE_HELP[mode] || MODE_HELP.object
-
-  function validate(file) {
-    if (!file) return 'Choose an image first.'
-    // Some browsers omit File.type for valid local images. Extension checks
-    // keep the picker permissive while Pillow verifies the real bytes server-side.
-    if (!hasSupportedExtension(file) || (file.type && !ALLOWED.includes(file.type))) return 'Only JPG and PNG files are supported.'
-    if (file.size > MAX_MB * 1024 * 1024) return `File is too large. Maximum allowed size is ${MAX_MB} MB.`
-    return null
-  }
-  async function upload(file) {
-    const message = validate(file); if (message) throw new Error(message)
-    const form = new FormData(); form.append('file', file)
-    const response = await fetch('/api/upload', { method: 'POST', body: form, signal: AbortSignal.timeout(30000) })
-    const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(`Upload failed (HTTP ${response.status}): ${data.detail || data.error || response.statusText || 'The backend did not provide details.'}`)
-    const localUrl = URL.createObjectURL(file); const dims = await imageDimensions(localUrl)
-    return { filename: data.filename, size: data.size_bytes ?? data.size, width: data.width || dims.width, height: data.height || dims.height, localUrl, remoteUrl: data.url || data.original_image_url || `/uploads/${data.stored_filename}`, fileId: data.file_id, sourceFile: file }
-  }
-  async function selectPrimary(file) {
-    if (!file) return
-    const message = validate(file)
-    if (message) { setError(message); return }
-    const previewUrl = URL.createObjectURL(file)
-    const previewDimensions = await imageDimensions(previewUrl)
-    setPendingPreview({ filename: file.name, size: file.size, localUrl: previewUrl, ...previewDimensions })
-    setError(null); setLoading(true)
-    try {
-      const result = await upload(file); onUploaded(result.fileId, result); setPendingPreview(null)
-      const analysisResponse = await fetch(`/api/process/${result.fileId}/input-analysis`)
-      if (analysisResponse.ok) onInputAnalysis?.(await analysisResponse.json())
-    } catch (err) { setError(describeUploadFailure(err)) } finally { setLoading(false) }
-  }
-  async function selectView(slot, file) {
-    if (!file) return
-    if (sameFile(file, uploadedFile?.sourceFile) || Object.values(inputViews).some(view => sameFile(file, view?.sourceFile))) { setError('That looks like an existing view. Choose a different camera angle.'); return }
-    setError(null); setViewLoading(slot)
-    try { const result = await upload(file); onInputViewsChange({ ...inputViews, [slot]: result }) } catch (err) { setError(`Could not upload the ${slot} view: ${describeUploadFailure(err)}`) } finally { setViewLoading('') }
-  }
-  function removeView(slot) { const next = { ...inputViews }; delete next[slot]; onInputViewsChange(next) }
-  function onDrop(event) { event.preventDefault(); setDragOver(false); selectPrimary(event.dataTransfer?.files?.[0]) }
-  const additionalCount = Math.max(0, Object.keys(inputViews).filter(key => key !== 'front').length)
-  const readiness = isMultiView ? Math.min(100, 55 + additionalCount * 15) : 100
-
-  return <div className="upload-workspace">
-    <section className="card-panel input-guidance"><div><p className="eyebrow">{mode === 'terrain' ? 'TERRAIN INPUT' : 'VISIBLE-SURFACE RECONSTRUCTION'}</p><h3>{help[0]}</h3><p>{help[1]}</p></div>{isMultiView && <div className="single-view-warning"><View size={19} /><span>Current local model uses the front image for its mesh. Additional angles are retained as project inputs but are not falsely claimed as fused geometry.</span></div>}</section>
-    <div className={`drop-zone ${dragOver ? 'drag-over' : ''}`} onDragOver={event => { event.preventDefault(); setDragOver(true) }} onDragLeave={() => setDragOver(false)} onDrop={onDrop} onClick={() => !loading && primaryInputRef.current?.click()}>
-      <input ref={primaryInputRef} type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; selectPrimary(file) }} />
-      {loading ? <div className="spinner-wrap" style={{ padding: 0 }}><div className="spinner" /><span>Validating and uploading…</span></div> : <><UploadCloud size={52} className="dz-icon" /><h3>{uploadedFile ? 'Replace primary image' : 'Drag and drop the primary image'}</h3><p>JPG / PNG · max {MAX_MB} MB · original image is preserved</p><button className="btn btn-primary" style={{ pointerEvents: 'none' }}>Select Image</button></>}
-    </div>
-    {error && <div className="state-box error"><AlertCircle size={32} /><h3>Input error</h3><p>{error}</p></div>}
-    {pendingPreview && !uploadedFile && <section className="card-panel"><div className="card-title"><h3><Image size={18} /> Local preview ready</h3><span className="title-badge">WAITING FOR UPLOAD</span></div><div className="img-compare"><div className="img-panel"><label>Selected image</label><img src={pendingPreview.localUrl} alt="Selected image preview" /></div><div className="meta-list"><div className="meta-row"><span className="meta-label">File</span><span className="meta-value highlight">{pendingPreview.filename}</span></div><div className="meta-row"><span className="meta-label">Dimensions</span><span className="meta-value">{pendingPreview.width} × {pendingPreview.height}px</span></div><div className="meta-row"><span className="meta-label">File size</span><span className="meta-value">{(pendingPreview.size / 1024 / 1024).toFixed(2)} MB</span></div><p className="details-copy">This preview is local. Start the backend and select the image again to complete upload.</p></div></div></section>}
-    {uploadedFile && <section className="card-panel"><div className="card-title"><h3><CheckCircle size={18} style={{ color: 'var(--primary-color)' }} /> Primary image ready</h3><span className="title-badge">PRESERVED</span></div><div className="img-compare"><div className="img-panel"><label><Image size={12} style={{ display: 'inline', marginRight: 6 }} />Front / primary image</label><img src={uploadedFile.localUrl} alt="Primary upload" /></div><div className="meta-list"><div className="meta-row"><span className="meta-label">File</span><span className="meta-value highlight">{uploadedFile.filename}</span></div><div className="meta-row"><span className="meta-label">Dimensions</span><span className="meta-value">{uploadedFile.width} × {uploadedFile.height}px</span></div><div className="meta-row"><span className="meta-label">File size</span><span className="meta-value">{(uploadedFile.size / 1024 / 1024).toFixed(2)} MB</span></div>{inputAnalysis && <><div className="meta-row"><span className="meta-label">Input quality</span><span className="meta-value highlight">{Math.round(inputAnalysis.input_quality * 100)}% · {inputAnalysis.input_quality_label}</span></div><div className="analysis-note"><strong>Workflow guidance</strong><span>{inputAnalysis.workflow_recommendation}</span><small>{inputAnalysis.scene_classification_note}</small></div></>}<p className="details-copy">Continue to Depth Analysis when ready. Uploading alone never adds an item to saved history.</p></div></div></section>}
-    {isMultiView && <section className="card-panel multiview-panel"><div className="card-title"><h3>Optional multi-view inputs</h3><span className="title-badge">READINESS {readiness}%</span></div><p className="details-copy">The local Depth Anything pipeline supports one visible image. Provide other angles now for a future multi-view/NeRF/Gaussian-splatting adapter; do not expect them to change the current single-image mesh.</p><div className="view-guide" aria-label="Recommended camera angles">{VIEW_SLOTS.map(([slot, label, required]) => <div className={inputViews[slot] ? 'ready' : ''} key={slot}><i>{slot.slice(0, 1).toUpperCase()}</i><span>{label}{required ? ' (primary)' : ' (optional)'}</span></div>)}</div><div className="view-grid">{VIEW_SLOTS.filter(([slot]) => slot !== 'front').map(([slot, label]) => <div className="view-card" key={slot}>{inputViews[slot] ? <><img src={inputViews[slot].localUrl} alt={`${label} view`} /><strong>{label} ✓</strong><button className="icon-button" onClick={() => removeView(slot)} aria-label={`Remove ${label} view`}><Trash2 size={15} /></button></> : <><input ref={element => { extraInputRefs.current[slot] = element }} type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; selectView(slot, file) }} /><button className="view-add" onClick={() => extraInputRefs.current[slot]?.click()} disabled={Boolean(viewLoading)}>{viewLoading === slot ? <div className="spinner tiny" /> : <Plus size={18} />}<span>Add {label}</span></button></>}</div>)}</div></section>}
+export default function UploadPanel({ mode, inputType, onInputTypeChange, characterStyle, onCharacterStyleChange, onUploaded, uploadedFile, inputAnalysis, onInputAnalysis, inputViews = {}, onInputViewsChange }) {
+  const inputRef = useRef(null); const extraRefs = useRef({}); const [dragOver, setDragOver] = useState(false); const [loading, setLoading] = useState(false); const [viewLoading, setViewLoading] = useState(''); const [error, setError] = useState(null)
+  const copy = MODE_COPY[mode] || MODE_COPY.object; const multi = copy.allowMulti && inputType === 'multi_view'; const extras = useMemo(() => Object.entries(inputViews).filter(([key]) => key !== 'single'), [inputViews])
+  function validate(file) { if (!file) return 'Choose an image first.'; if (!/\.(jpe?g|png)$/i.test(file.name) || (file.type && !ALLOWED.includes(file.type))) return 'Only JPG and PNG images are supported.'; if (file.size > MAX_MB * 1024 * 1024) return `Image is larger than the ${MAX_MB} MB limit.`; return null }
+  async function upload(file, metadata = {}) { const validation = validate(file); if (validation) throw new Error(validation); const form = new FormData(); form.append('file', file); form.append('input_type', inputType); form.append('view_label', metadata.viewLabel || 'Unknown / Auto-detect view'); const response = await fetch('/api/upload', { method: 'POST', body: form, signal: AbortSignal.timeout(30000) }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.detail || data.error || `Upload failed with HTTP ${response.status}.`); const localUrl = URL.createObjectURL(file); const dims = await imageDimensions(localUrl); return { filename: data.filename, size: data.size_bytes ?? file.size, width: data.width || dims.width, height: data.height || dims.height, localUrl, remoteUrl: data.url || `/uploads/${data.stored_filename}`, fileId: data.file_id, sourceFile: file, inputType, viewLabel: metadata.viewLabel || 'Unknown / Auto-detect view' } }
+  async function selectSingle(file) { if (!file) return; setError(null); setLoading(true); try { const result = await upload(file); onUploaded(result.fileId, result); const analysis = await fetch(`/api/process/${result.fileId}/input-analysis`); if (analysis.ok) onInputAnalysis?.(await analysis.json()) } catch (uploadError) { setError(describe(uploadError)) } finally { setLoading(false) } }
+  async function addView(file) { if (!file) return; if (sameFile(file, uploadedFile?.sourceFile) || extras.some(([, view]) => sameFile(file, view.sourceFile))) { setError('That image is already in this project. Choose a different angle.'); return }; const key = `view-${Date.now()}`; setViewLoading(key); setError(null); try { const result = await upload(file); onInputViewsChange({ ...inputViews, [key]: result }) } catch (uploadError) { setError(describe(uploadError)) } finally { setViewLoading('') } }
+  function removeView(key) { const next = { ...inputViews }; delete next[key]; onInputViewsChange(next) }
+  function replaceView(key, file) { if (!file) return; removeView(key); addView(file) }
+  function updateViewLabel(key, viewLabel) { onInputViewsChange({ ...inputViews, [key]: { ...inputViews[key], viewLabel } }) }
+  function reorder(key, direction) { const entries = Object.entries(inputViews); const movable = entries.filter(([current]) => current !== 'single'); const index = movable.findIndex(([current]) => current === key); const nextIndex = index + direction; if (index < 0 || nextIndex < 0 || nextIndex >= movable.length) return; [movable[index], movable[nextIndex]] = [movable[nextIndex], movable[index]]; const next = inputViews.single ? { single: inputViews.single } : {}; movable.forEach(([viewKey, view]) => { next[viewKey] = view }); onInputViewsChange(next) }
+  function onDrop(event) { event.preventDefault(); setDragOver(false); selectSingle(event.dataTransfer?.files?.[0]) }
+  return <div className="upload-workspace dedicated-input-workflow">
+    <section className="card-panel input-guidance"><div><p className="eyebrow">{copy.eyebrow}</p><h3>{copy.title}</h3><p>{copy.body}</p></div>{multi && <div className="single-view-warning"><View size={19} /><span>Multiple views improve reconstruction accuracy. Label a view only when you know its angle; otherwise leave it on auto-detect.</span></div>}</section>
+    {copy.allowMulti && <section className="input-type-card"><strong>Choose input setup</strong><div><button className={inputType === 'single' ? 'selected' : ''} onClick={() => onInputTypeChange('single')}><b>Single Image</b><small>One unknown camera viewpoint</small></button><button className={inputType === 'multi_view' ? 'selected' : ''} onClick={() => onInputTypeChange('multi_view')}><b>Multi-View</b><small>Two or more useful angles</small></button></div></section>}
+    {mode === 'character' && <section className="character-style-card"><strong>Character direction</strong><div>{['Realistic', 'Cartoon', 'Anime', 'Stylized'].map(style => <button key={style} className={characterStyle === style ? 'selected' : ''} onClick={() => onCharacterStyleChange(style)}>{style}</button>)}</div><p>The local depth pipeline creates an actual visible-surface mesh. A full generative character provider is not configured, so hidden anatomy and back details are not fabricated.</p></section>}
+    <div className={`drop-zone ${dragOver ? 'drag-over' : ''}`} onDragOver={event => { event.preventDefault(); setDragOver(true) }} onDragLeave={() => setDragOver(false)} onDrop={onDrop} onClick={() => !loading && inputRef.current?.click()}><input ref={inputRef} type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; selectSingle(file) }} />{loading ? <div className="spinner-wrap"><div className="spinner" /><span>Validating and uploading…</span></div> : <><UploadCloud size={52} className="dz-icon" /><h3>{uploadedFile ? `Replace ${copy.label.toLowerCase()}` : `Drop a ${copy.label.toLowerCase()} here`}</h3><p>JPG / PNG · maximum {MAX_MB} MB · preserved original</p><button className="btn btn-primary" style={{ pointerEvents: 'none' }}>Select image</button></>}</div>
+    {error && <div className="state-box error"><AlertCircle size={32} /><h3>Upload could not continue</h3><p>{error}</p></div>}
+    {uploadedFile && <section className="card-panel"><div className="card-title"><h3><CheckCircle size={18} /> Single image loaded</h3><span className="title-badge">UNKNOWN VIEWPOINT</span></div><div className="img-compare"><div className="img-panel"><label>{copy.label} · unknown / auto-detect view</label><img src={uploadedFile.localUrl} alt="Uploaded reconstruction input" /></div><div className="meta-list"><div className="meta-row"><span className="meta-label">File</span><span className="meta-value highlight">{uploadedFile.filename}</span></div><div className="meta-row"><span className="meta-label">Dimensions</span><span className="meta-value">{uploadedFile.width} × {uploadedFile.height}px</span></div><div className="meta-row"><span className="meta-label">Input type</span><span className="meta-value">{multi ? 'Multi-view set' : 'Single image'}</span></div>{inputAnalysis && <div className="analysis-note"><strong>Input guidance</strong><span>{inputAnalysis.workflow_recommendation}</span><small>{inputAnalysis.scene_classification_note}</small></div>}<p className="details-copy">Uploading does not add this item to history. Save it only after you choose to keep a generated project.</p></div></div></section>}
+    {multi && <section className="card-panel multiview-panel"><div className="card-title"><h3>Additional views</h3><span className="title-badge">{(uploadedFile ? 1 : 0) + extras.length} / 2 MINIMUM</span></div><p className="details-copy">Add at least one more useful angle for multi-view input. Unknown / Auto-detect view is valid when you do not know the camera direction.</p><div className="view-grid">{extras.map(([key, view], index) => <div className="view-card detailed-view-card" key={key}><img src={view.localUrl} alt={`Additional view ${index + 1}`} /><strong>View {index + 2}</strong><select value={view.viewLabel || VIEW_LABELS[0]} onChange={event => updateViewLabel(key, event.target.value)}>{VIEW_LABELS.map(label => <option key={label}>{label}</option>)}</select><div className="view-card-actions"><button onClick={() => reorder(key, -1)} disabled={index === 0} aria-label="Move view earlier"><ArrowUp size={14} /></button><button onClick={() => reorder(key, 1)} disabled={index === extras.length - 1} aria-label="Move view later"><ArrowDown size={14} /></button><input ref={element => { extraRefs.current[key] = element }} type="file" accept="image/jpeg,image/png" hidden onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; replaceView(key, file) }} /><button onClick={() => extraRefs.current[key]?.click()} aria-label="Replace view"><Replace size={14} /></button><button onClick={() => removeView(key)} aria-label="Remove view"><Trash2 size={14} /></button></div></div>)}<div className="view-card add-view-card"><input ref={element => { extraRefs.current.new = element }} type="file" accept="image/jpeg,image/png" hidden onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; addView(file) }} /><button className="view-add" onClick={() => extraRefs.current.new?.click()} disabled={Boolean(viewLoading)}>{viewLoading ? <div className="spinner tiny" /> : <Plus size={18} />}<span>Add another view</span></button></div></div>{uploadedFile && extras.length < 1 && <div className="single-view-warning request-more"><View size={18} /><span>This project has areas that cannot be reconstructed reliably from one view. Add another angle for a better result.</span></div>}</section>}
   </div>
 }

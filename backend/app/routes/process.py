@@ -1,9 +1,11 @@
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status, Query
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List
 import os
 import glob
+import json
+import re
 import numpy as np
 import cv2
 import threading
@@ -20,7 +22,9 @@ router = APIRouter()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(os.path.dirname(BASE_DIR), "uploads")
 MODEL_DIR = os.path.join(os.path.dirname(BASE_DIR), "models")
+TEXT3D_MODEL_DIR = os.path.join(os.path.dirname(BASE_DIR), "generated_models")
 os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(TEXT3D_MODEL_DIR, exist_ok=True)
 
 # Pydantic models for request validation
 class GCPPoint(BaseModel):
@@ -32,10 +36,23 @@ class CalibrateRequest(BaseModel):
     gcp_points: List[GCPPoint]
 
 class TextTo3DRequest(BaseModel):
-    prompt: str
-    category: str = "Other"
-    style: str = "Realistic"
+    # ``prompt`` remains accepted for older browser sessions, but the current
+    # product is typography-first and the exact visible text is carried in
+    # ``text``. It is never interpreted as an object description.
+    text: str = ""
+    prompt: str = ""
+    text_type: str = Field("Auto Detect", alias="type")
+    font_style: str = "Bold Sans"
+    style: str = "Metallic"
+    material: str = "Metallic"
+    color: str = "#FFFFFF"
+    depth: str = "Medium"
+    bevel: str = "Medium"
+    layout: str = "Horizontal"
     quality: str = "Balanced"
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 def _load_finite_array(path: str, label: str) -> np.ndarray:
@@ -62,16 +79,47 @@ def _find_original_file(file_id: str) -> str | None:
     return files[0] if files else None
 
 
-TEXT3D_CATEGORIES = {"Object", "Character", "Vehicle", "Building", "Furniture", "Animal", "Product", "Fantasy", "Other"}
-TEXT3D_STYLES = {"Realistic", "Stylized", "Cartoon", "Low Poly", "Anime", "Fantasy", "Sci-Fi"}
+TEXT3D_TYPES = {"Alphabet", "Number", "Word", "Phrase", "Auto Detect"}
+TEXT3D_FONTS = {"Bold Sans", "Modern", "Serif", "Rounded", "Futuristic", "Elegant", "Script", "Block", "Display"}
+TEXT3D_STYLES = {"Classic", "Metallic", "Chrome", "Gold", "Glass", "Neon", "Stone", "Wood", "Plastic", "Matte", "Glossy", "Futuristic"}
+TEXT3D_MATERIALS = {"Metallic", "Plastic", "Glass", "Stone", "Wood", "Chrome", "Matte", "Gloss"}
+TEXT3D_DEPTHS = {"Thin", "Medium", "Thick"}
+TEXT3D_BEVELS = {"None", "Small", "Medium", "Large"}
+TEXT3D_LAYOUTS = {"Horizontal", "Centered", "Stacked", "Single Line"}
 TEXT3D_QUALITY = {"Draft", "Balanced", "High"}
+TEXT3D_ALLOWED_TEXT = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -&'.,!?")
 TEXT3D_JOBS: dict[str, dict] = {}
 TEXT3D_LOCK = threading.Lock()
 
 
-def _enhance_text_prompt(prompt: str, category: str, style: str, quality: str) -> str:
-    detail = {"Draft": "clean web-ready topology", "Balanced": "clean topology, proportionate forms, and coherent PBR-ready materials", "High": "detailed clean topology, accurate proportions, high-quality materials, and web-ready GLB optimization"}[quality]
-    return f"{prompt.strip()}. Create a single {style.lower()} {category.lower()} asset with {detail}. Center the subject, avoid text, logos, floating fragments, duplicate parts, and background scenery. Deliver a valid textured GLB."
+def _detect_text_type(text: str) -> str:
+    compact = text.replace(" ", "")
+    if len(compact) == 1 and compact.isalpha():
+        return "Alphabet"
+    if compact.isdigit():
+        return "Number"
+    return "Phrase" if " " in text.strip() else "Word"
+
+
+def _enhance_text_prompt(text: str, text_type: str, font_style: str, style: str, material: str, color: str, depth: str, bevel: str, layout: str, quality: str) -> str:
+    detail = {
+        "Draft": "clean, low-complexity web-ready topology",
+        "Balanced": "clean topology, proportionate extrusion, readable silhouettes, and coherent PBR-ready materials",
+        "High": "detailed clean topology, crisp readable glyph edges, high-quality materials, UVs, and web-ready GLB optimization",
+    }[quality]
+    # JSON encoding preserves quotes and whitespace safely while presenting the
+    # exact requested character sequence unambiguously to the remote model.
+    exact = json.dumps(text, ensure_ascii=False)
+    return (
+        f"Create one standalone 3D typography object containing exactly the text {exact}. "
+        f"This is a {text_type.lower()} text asset: preserve the exact spelling, capitalization, character order, spaces, and number of characters. "
+        "Make every requested glyph clearly readable as actual connected, extruded 3D letter or number geometry. "
+        f"Use a {font_style.lower()} typography direction, {style.lower()} appearance, {material.lower()} material, {color} color, "
+        f"{depth.lower()} extrusion, {bevel.lower()} bevel edges, and a {layout.lower()} layout. "
+        f"Use {detail}. Center and fully frame the complete text as a clean GLB-ready asset. "
+        "Do not interpret the text as an object or scene. Do not add, remove, replace, crop, rearrange, misspell, or stylize into unreadable glyphs. "
+        "Do not add logos, symbols, decorative text, people, scenery, props, floating fragments, or unrelated objects."
+    )
 
 
 def _canonical_text3d_value(value: str, options: set[str]) -> str | None:
@@ -79,16 +127,28 @@ def _canonical_text3d_value(value: str, options: set[str]) -> str | None:
     return next((option for option in options if option.lower() == normalized), None)
 
 
-def _validate_text3d_request(request: TextTo3DRequest) -> tuple[str, str, str, str]:
-    prompt = request.prompt.strip()
-    if len(prompt) < 4 or len(prompt) > 1000 or prompt.lower() in {"hello", "hi", "test", "model", "thing", "object"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter a meaningful 3D object description between 4 and 1000 characters.")
-    category = _canonical_text3d_value(request.category, TEXT3D_CATEGORIES)
+def _validate_text3d_request(request: TextTo3DRequest) -> dict:
+    text = (request.text or request.prompt).strip()
+    if not text or len(text) > 96:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter between 1 and 96 characters for the 3D word or alphabet.")
+    if any(character not in TEXT3D_ALLOWED_TEXT for character in text):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Use letters, numbers, spaces, and simple punctuation only for 3D typography.")
+    text_type = _canonical_text3d_value(request.text_type, TEXT3D_TYPES)
+    font_style = _canonical_text3d_value(request.font_style, TEXT3D_FONTS)
     style = _canonical_text3d_value(request.style, TEXT3D_STYLES)
+    material = _canonical_text3d_value(request.material, TEXT3D_MATERIALS)
+    depth = _canonical_text3d_value(request.depth, TEXT3D_DEPTHS)
+    bevel = _canonical_text3d_value(request.bevel, TEXT3D_BEVELS)
+    layout = _canonical_text3d_value(request.layout, TEXT3D_LAYOUTS)
     quality = _canonical_text3d_value(request.quality, TEXT3D_QUALITY)
-    if not category or not style or not quality:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported category, style, or quality option.")
-    return prompt, category, style, quality
+    color = request.color.strip().upper()
+    if not text_type or not font_style or not style or not material or not depth or not bevel or not layout or not quality:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported typography customization option.")
+    if not re.fullmatch(r"#[0-9A-F]{6}", color):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Enter a valid six-digit HEX color, for example #FFD700.")
+    if text_type == "Auto Detect":
+        text_type = _detect_text_type(text)
+    return {"text": text, "text_type": text_type, "font_style": font_style, "style": style, "material": material, "color": color, "depth": depth, "bevel": bevel, "layout": layout, "quality": quality}
 
 
 def _foreground_mask(image_path: str | None, normalized_depth: np.ndarray) -> tuple[np.ndarray, str]:
@@ -435,8 +495,8 @@ def get_object_reconstruction_data(
 @router.post("/text3d/enhance")
 @router.post("/text-to-3d/enhance", include_in_schema=False)
 def enhance_text_to_3d_prompt(request: TextTo3DRequest):
-    prompt, category, style, quality = _validate_text3d_request(request)
-    return {"success": True, "enhanced_prompt": _enhance_text_prompt(prompt, category, style, quality)}
+    typography = _validate_text3d_request(request)
+    return {"success": True, **typography, "enhanced_prompt": _enhance_text_prompt(**typography)}
 
 
 def _run_text3d_job(job_id: str, payload: dict):
@@ -445,7 +505,7 @@ def _run_text3d_job(job_id: str, payload: dict):
             if job_id in TEXT3D_JOBS:
                 TEXT3D_JOBS[job_id].update({"status": current_status, "message": message, "updated_at": time.time()})
     try:
-        result = text3d_service.generate(payload, MODEL_DIR, update_status)
+        result = text3d_service.generate(payload, TEXT3D_MODEL_DIR, update_status)
         with TEXT3D_LOCK:
             TEXT3D_JOBS[job_id].update({"success": True, "status": "completed", "message": "3D model is ready and its GLB geometry was validated.", "model_url": f"/api/text3d/model/{result['model_filename']}", "format": "glb", "metadata": result["provider_metadata"], "updated_at": time.time()})
     except Text3DProviderError as error:
@@ -459,16 +519,16 @@ def _run_text3d_job(job_id: str, payload: dict):
 @router.post("/text3d/generate", status_code=status.HTTP_202_ACCEPTED)
 @router.post("/text-to-3d", status_code=status.HTTP_202_ACCEPTED, include_in_schema=False)
 def text_to_3d(request: TextTo3DRequest, background_tasks: BackgroundTasks):
-    prompt, category, style, quality = _validate_text3d_request(request)
+    typography = _validate_text3d_request(request)
     if not text3d_service.configured():
         state = text3d_service.status()
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=state.get("required") or state["message"])
-    enhanced_prompt = _enhance_text_prompt(prompt, category, style, quality)
+    enhanced_prompt = _enhance_text_prompt(**typography)
     job_id = uuid.uuid4().hex
-    job = {"job_id": job_id, "success": True, "status": "preparing", "message": "Preparing your generation request.", "prompt": prompt, "enhanced_prompt": enhanced_prompt, "category": category, "style": style, "quality": quality, "created_at": time.time(), "updated_at": time.time()}
+    job = {"job_id": job_id, "success": True, "status": "preparing", "message": "Preparing exact 3D typography generation.", "prompt": typography["text"], "text": typography["text"], "enhanced_prompt": enhanced_prompt, **typography, "created_at": time.time(), "updated_at": time.time()}
     with TEXT3D_LOCK:
         TEXT3D_JOBS[job_id] = job
-    background_tasks.add_task(_run_text3d_job, job_id, {"prompt": prompt, "enhanced_prompt": enhanced_prompt, "category": category, "style": style, "quality": quality, "output_format": "glb"})
+    background_tasks.add_task(_run_text3d_job, job_id, {"prompt": typography["text"], "enhanced_prompt": enhanced_prompt, **typography, "output_format": "glb"})
     return {**job, "status_url": f"/api/text3d/status/{job_id}"}
 
 
@@ -504,7 +564,7 @@ def get_validated_text3d_model(filename: str):
     safe_name = os.path.basename(filename)
     if safe_name != filename or not safe_name.startswith("text3d_") or not safe_name.endswith(".glb"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Text-to-3D model name.")
-    model_path = os.path.join(MODEL_DIR, safe_name)
+    model_path = os.path.join(TEXT3D_MODEL_DIR, safe_name)
     if not os.path.isfile(model_path):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Validated Text-to-3D model not found.")
     return FileResponse(model_path, media_type="model/gltf-binary", filename=safe_name, content_disposition_type="inline")

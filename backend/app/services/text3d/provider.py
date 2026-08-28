@@ -185,3 +185,174 @@ class GenericHttpText3DEngine(Text3DEngine):
         stored = self._download_model(model_url, models_dir)
         update_status("validating", "Validated GLB geometry and mesh structure.")
         return {**stored, "provider_metadata": {"provider": "generic_http", "geometry": stored["geometry"], "provider_job_id": result.get("job_id") or result.get("id") or result.get("result")}}
+
+
+class TripoText3DEngine(GenericHttpText3DEngine):
+    """Official Tripo OpenAPI Text-to-3D adapter.
+
+    Tripo's task API is asynchronous. The backend submits a real
+    ``text_to_model`` task, waits for its terminal status, downloads the
+    temporary output URL immediately, then validates the GLB before exposing
+    it to the browser.
+    """
+
+    default_base_url = "https://openapi.tripo3d.ai/v3"
+
+    def _tripo_key(self) -> str:
+        return os.getenv("TRIPO_API_KEY", "").strip()
+
+    def _tripo_base_url(self) -> str:
+        return os.getenv("TRIPO_API_BASE_URL", self.default_base_url).strip().rstrip("/")
+
+    def _tripo_model_version(self) -> str:
+        return os.getenv("TRIPO_MODEL_VERSION", "v3.1-20260211").strip()
+
+    def configured(self) -> bool:
+        return bool(self._tripo_key()) and bool(self._tripo_base_url())
+
+    def status(self) -> dict:
+        configured = self.configured()
+        return {
+            "configured": configured,
+            "provider_available": configured,
+            "engine": "tripo" if configured else "not_configured",
+            "engine_installed": configured,
+            "message": "Tripo Text-to-3D is configured. Generated GLBs are validated before preview." if configured else "Tripo Text-to-3D credentials are missing.",
+            "required": "Set TEXT3D_PROVIDER=tripo and TRIPO_API_KEY in backend/.env, then restart FastAPI." if not configured else None,
+        }
+
+    def _tripo_request(self, url: str, *, payload: dict | None = None) -> dict:
+        headers = {"Accept": "application/json", "Authorization": f"Bearer {self._tripo_key()}"}
+        body, method = None, "GET"
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
+            body, method = json.dumps(payload).encode("utf-8"), "POST"
+        try:
+            with urlopen(Request(url, data=body, headers=headers, method=method), timeout=45) as response:
+                decoded = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            # V3 returns structured ``error_code`` / ``error_message`` data
+            # for many failed requests. Read it only to present a safe error;
+            # credentials are never logged or returned by this adapter.
+            provider_code, provider_message = self._tripo_http_error(error)
+            if provider_code == 2010 or (provider_message and "not enough credit" in provider_message.lower()):
+                raise Text3DProviderError(provider_message or "Tripo account has insufficient credits to create this task.", "insufficient_credits") from error
+            if error.code in {401, 403}:
+                message = provider_message or "Tripo rejected the configured API key."
+                raise Text3DProviderError(message, "authentication_failed") from error
+            if error.code == 429:
+                raise Text3DProviderError(provider_message or "Tripo rate limit reached. Retry later.", "rate_limited") from error
+            if error.code >= 500:
+                raise Text3DProviderError(provider_message or "Tripo is temporarily unavailable.", "provider_unavailable") from error
+            code_note = f" (Tripo error {provider_code})" if provider_code is not None else ""
+            raise Text3DProviderError(provider_message or f"Tripo request failed (HTTP {error.code}){code_note}.", "provider_request_failed") from error
+        except URLError as error:
+            raise Text3DProviderError("Tripo could not be reached. Check the network and API base URL.", "network_failure") from error
+        except (ValueError, UnicodeDecodeError) as error:
+            raise Text3DProviderError("Tripo returned invalid JSON.", "invalid_provider_response") from error
+        if not isinstance(decoded, dict):
+            raise Text3DProviderError("Tripo returned an invalid response.", "invalid_provider_response")
+        if decoded.get("code") not in (None, 0):
+            message = decoded.get("message") or decoded.get("error") or "Tripo rejected the generation request."
+            raise Text3DProviderError(f"Tripo: {message}", "provider_request_failed")
+        data = decoded.get("data")
+        if not isinstance(data, dict):
+            raise Text3DProviderError("Tripo response did not contain task data.", "invalid_provider_response")
+        return data
+
+    def _tripo_http_error(self, error: HTTPError) -> tuple[object | None, str | None]:
+        """Read a v3 error body without ever exposing the configured key."""
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        provider_code = payload.get("error_code", payload.get("code", data.get("error_code")))
+        message = payload.get("error_message") or payload.get("message") or data.get("error_message") or data.get("message")
+        if not isinstance(message, str):
+            return provider_code, None
+        # Remote error bodies should not contain a credential, but defensively
+        # strip it before this becomes a user-visible job failure.
+        sanitized = message.replace(self._tripo_key(), "<redacted>").strip()
+        return provider_code, sanitized[:500] or None
+
+    @staticmethod
+    def _tripo_quality_options(quality: str, style: str) -> dict:
+        if quality == "Draft":
+            options = {"geometry_quality": "standard", "texture_quality": "standard", "face_limit": 20000}
+        elif quality == "High":
+            options = {"geometry_quality": "detailed", "texture_quality": "detailed", "face_limit": 100000}
+        else:
+            options = {"geometry_quality": "standard", "texture_quality": "detailed", "face_limit": 50000}
+        if style == "Low Poly":
+            options["smart_low_poly"] = True
+            options["face_limit"] = min(options["face_limit"], 20000)
+        return options
+
+    @staticmethod
+    def _tripo_model_url(output: dict) -> str | None:
+        # V3 returns the downloadable GLB at data.output.model_url.
+        value = output.get("model_url")
+        return value if isinstance(value, str) and value else None
+
+    def generate(self, payload: dict, models_dir: str, update_status) -> dict:
+        if not self.configured():
+            raise Text3DProviderError(self.status()["required"], "provider_not_configured")
+        update_status("preparing", "Preparing your prompt for Tripo Text-to-3D.")
+        task_payload = {
+            "prompt": payload["enhanced_prompt"],
+            "model": self._tripo_model_version(),
+            "negative_prompt": "object representing the meaning of the text, scenery, people, unrelated objects, extra words, logos, changed spelling, random letters, flat 2D text, floating disconnected fragments, cropped text, broken geometry",
+            "texture": True,
+            "pbr": True,
+            "export_uv": True,
+            "compress": "geometry",
+            "auto_size": True,
+            **self._tripo_quality_options(payload["quality"], payload["style"]),
+        }
+        update_status("generating", "Submitting a real Text-to-3D task to Tripo.")
+        created = self._tripo_request(f"{self._tripo_base_url()}/generation/text-to-model", payload=task_payload)
+        task_id = created.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise Text3DProviderError("Tripo did not return a task ID.", "invalid_provider_response")
+
+        timeout = max(30, int(os.getenv("TRIPO_TIMEOUT_SECONDS", "900")))
+        interval = max(1, float(os.getenv("TRIPO_POLL_SECONDS", "3")))
+        started = time.monotonic()
+        task = created
+        while True:
+            task = self._tripo_request(f"{self._tripo_base_url()}/tasks/{quote(task_id, safe='')}")
+            task_status = str(task.get("status", "unknown")).lower()
+            if task_status == "success":
+                break
+            if task_status in {"failed", "banned", "expired", "cancelled", "unknown"}:
+                message = task.get("error_message") or task.get("message") or task.get("error") or f"Tripo task {task_status}."
+                error_code = task.get("error_code")
+                if error_code is not None:
+                    message = f"{message} (Tripo error {error_code})"
+                raise Text3DProviderError(f"Tripo generation failed: {message}", "generation_failed")
+            if time.monotonic() - started > timeout:
+                raise Text3DProviderError("Tripo generation timed out.", "timeout")
+            progress = task.get("progress")
+            progress_note = f" ({progress}%)" if isinstance(progress, (int, float)) else ""
+            update_status("processing", f"Tripo is building the 3D model{progress_note}")
+            time.sleep(interval)
+
+        output = task.get("output")
+        model_url = self._tripo_model_url(output) if isinstance(output, dict) else None
+        if not model_url:
+            raise Text3DProviderError("Tripo completed without a downloadable model URL.", "unsupported_format")
+        update_status("downloading", "Downloading Tripo's generated model for validation.")
+        stored = self._download_model(model_url, models_dir)
+        update_status("validating", "Validated generated GLB geometry and mesh structure.")
+        return {
+            **stored,
+            "provider_metadata": {
+                "provider": "tripo",
+                "provider_task_id": task_id,
+                "model_version": self._tripo_model_version(),
+                "geometry": stored["geometry"],
+            },
+        }

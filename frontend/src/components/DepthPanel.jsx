@@ -58,11 +58,11 @@ export default function DepthPanel({ fileId, uploadedFile, depthResult, mode = '
           </div>
           <div className="meta-row">
             <span className="meta-label">Reconstruction mode</span>
-            <span className="meta-value">{mode === 'anime' ? '3D Character' : `3D ${mode[0].toUpperCase()}${mode.slice(1)}`}</span>
+            <span className="meta-value">{mode === 'scene' ? '3D Image / Scene' : mode === 'character' ? '3D Character' : `3D ${mode[0].toUpperCase()}${mode.slice(1)}`}</span>
           </div>
           <div className="meta-row">
             <span className="meta-label">Input views</span>
-            <span className="meta-value">{inputViewCount} (local model uses the primary image)</span>
+            <span className="meta-value">{inputViewCount} (the current local model uses the selected single image)</span>
           </div>
           <div className="meta-row">
             <span className="meta-label">Status</span>

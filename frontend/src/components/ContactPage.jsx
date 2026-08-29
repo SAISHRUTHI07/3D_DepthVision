@@ -1,0 +1,8 @@
+import { AtSign, MessageCircle, Send } from 'lucide-react'
+import { useState } from 'react'
+
+export default function ContactPage() {
+  const [sent, setSent] = useState(false)
+  function submit(event) { event.preventDefault(); setSent(true) }
+  return <div className="information-page contact-page"><section className="information-hero contact-hero"><p className="eyebrow"><MessageCircle size={14} /> CONTACT 3D DEPTHVISION</p><h2>Let's Connect &amp; Build the Future of <em>3D Terrain Visualization.</em></h2><p>Have a question, idea, or collaboration opportunity? We'd love to hear from you. Connect with the 3D DepthVision team and explore the possibilities of AI-powered terrain visualization.</p></section><section className="contact-grid"><div className="contact-copy"><p className="eyebrow">START A CONVERSATION</p><h3>Great terrain ideas deserve a clearer dimension.</h3><p>Whether you are exploring a Smart India Hackathon collaboration, testing a use case, or simply curious about the technology, the team is ready to connect.</p><a href="mailto:support@3ddepthvision.local"><AtSign size={18} /> support@3ddepthvision.local</a></div><form className="contact-form" onSubmit={submit}><label>Name<input required placeholder="Your name" /></label><label>Email<input required type="email" placeholder="you@example.com" /></label><label>How can we help?<textarea required placeholder="Tell us about your idea, question, or collaboration opportunity." /></label><button className="btn btn-primary" type="submit"><Send size={16} /> Send message</button>{sent && <p className="contact-success">Thanks for reaching out. Your message is ready for the 3D DepthVision team.</p>}</form></section></div>
+}

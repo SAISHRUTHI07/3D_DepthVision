@@ -18,7 +18,7 @@ export default function QueryPanel({ fileId, uploadedFile, initialPoint }) {
     const safeY = asCoordinate(y, uploadedFile.height)
     setX(safeX); setY(safeY)
     try {
-      const response = await fetch(`/api/process/${fileId}/analytics?x=${safeX}&y=${safeY}`, { signal: AbortSignal.timeout(15000) })
+      const response = await fetch(`/api/process/${fileId}/analytics?x=${safeX}&y=${safeY}&reconstruction_type=terrain`, { signal: AbortSignal.timeout(15000) })
       const data = await response.json().catch(() => ({}))
       if (!response.ok) throw new Error(data.detail || 'Point query failed.')
       setResult(data)

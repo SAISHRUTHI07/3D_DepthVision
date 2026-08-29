@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 import os
 import uuid
 import shutil
+import json
 from PIL import Image, UnidentifiedImageError
 
 router = APIRouter()
@@ -10,15 +11,19 @@ router = APIRouter()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(os.path.dirname(BASE_DIR), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+MANIFEST_DIR = os.path.join(UPLOAD_DIR, ".manifests")
+os.makedirs(MANIFEST_DIR, exist_ok=True)
 
 # Validations
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 MAX_IMAGE_PIXELS = 50_000_000
+RECONSTRUCTION_TYPES = {"object", "terrain", "human", "character"}
 
 @router.post("/upload")
 async def upload_image(
     file: UploadFile = File(...),
+    reconstruction_type: str = Form(...),
     input_type: str = Form("single"),
     view_label: str = Form("Unknown / Auto-detect view"),
 ):
@@ -31,6 +36,8 @@ async def upload_image(
     # pipeline still processes one selected image at a time; multi-view clients
     # can upload their set with optional labels without being misrepresented as
     # fused geometry.
+    if reconstruction_type not in RECONSTRUCTION_TYPES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid reconstruction type. Choose object, terrain, human, or character.")
     if input_type not in {"single", "multi_view"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="input_type must be 'single' or 'multi_view'.")
     if len(view_label.strip()) > 64:
@@ -63,8 +70,10 @@ async def upload_image(
         
     # 3. Generate unique identifier and save file
     file_id = uuid.uuid4().hex
+    workspace_dir = os.path.join(UPLOAD_DIR, reconstruction_type)
+    os.makedirs(workspace_dir, exist_ok=True)
     stored_filename = f"{file_id}{ext}"
-    stored_filepath = os.path.join(UPLOAD_DIR, stored_filename)
+    stored_filepath = os.path.join(workspace_dir, stored_filename)
     
     try:
         with open(stored_filepath, "wb") as buffer:
@@ -92,6 +101,10 @@ async def upload_image(
             pass
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid image: {str(e)}")
         
+    manifest = {"file_id": file_id, "reconstruction_type": reconstruction_type, "input_type": input_type, "view_label": view_label.strip() or "Unknown / Auto-detect view", "stored_filename": stored_filename}
+    with open(os.path.join(MANIFEST_DIR, f"{file_id}.json"), "w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file)
+
     return {
         "success": True,
         "file_id": file_id,
@@ -100,11 +113,12 @@ async def upload_image(
         "size_bytes": file_size,
         "size": file_size,
         "content_type": file.content_type or "application/octet-stream",
-        "original_image_url": f"/uploads/{stored_filename}",
-        "url": f"/uploads/{stored_filename}",
+        "original_image_url": f"/uploads/{reconstruction_type}/{stored_filename}",
+        "url": f"/uploads/{reconstruction_type}/{stored_filename}",
         "width": width,
         "height": height,
         "input_type": input_type,
+        "reconstruction_type": reconstruction_type,
         "view_label": view_label.strip() or "Unknown / Auto-detect view",
         "message": "Image uploaded successfully."
     }

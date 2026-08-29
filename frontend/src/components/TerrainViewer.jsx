@@ -23,7 +23,7 @@ export default function TerrainViewer({ fileId, depthResult, terrainData, onTerr
     const controller = new AbortController()
     const timer = window.setTimeout(() => controller.abort(), 45000)
     try {
-      const res = await fetch(`/api/process/${fileId}/terrain?grid_size=${size}`, { signal: controller.signal })
+      const res = await fetch(`/api/process/${fileId}/terrain?grid_size=${size}&reconstruction_type=terrain`, { signal: controller.signal })
       if (!res.ok) {
         const j = await res.json().catch(() => ({}))
         throw new Error(j.detail || 'Terrain generation failed.')

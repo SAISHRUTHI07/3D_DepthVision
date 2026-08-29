@@ -12,7 +12,7 @@ export default function DepthPanel({ fileId, uploadedFile, depthResult, mode = '
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 120000)
     try {
-      const res = await fetch(`/api/process/${fileId}/depth`, { method: 'POST', signal: controller.signal })
+      const res = await fetch(`/api/process/${fileId}/depth?reconstruction_type=${encodeURIComponent(mode)}`, { method: 'POST', signal: controller.signal })
       if (!res.ok) {
         const j = await res.json().catch(() => ({}))
         throw new Error(j.detail || 'Depth estimation failed.')
@@ -58,7 +58,7 @@ export default function DepthPanel({ fileId, uploadedFile, depthResult, mode = '
           </div>
           <div className="meta-row">
             <span className="meta-label">Reconstruction mode</span>
-            <span className="meta-value">{mode === 'scene' ? '3D Image / Scene' : mode === 'character' ? '3D Character' : `3D ${mode[0].toUpperCase()}${mode.slice(1)}`}</span>
+            <span className="meta-value">{mode === 'human' ? '3D Human' : mode === 'character' ? '3D Character' : `3D ${mode[0].toUpperCase()}${mode.slice(1)}`}</span>
           </div>
           <div className="meta-row">
             <span className="meta-label">Input views</span>

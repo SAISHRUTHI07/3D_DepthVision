@@ -16,17 +16,37 @@ function loadFont(fontStyle) {
   return FONT_CACHE.get(name)
 }
 
-function materialFor(config) {
-  const base = { color: new THREE.Color(config.color), metalness: config.metalness, roughness: config.roughness, side: THREE.DoubleSide }
-  if (config.material === 'Matte') return new THREE.MeshStandardMaterial({ ...base, metalness: 0, roughness: Math.max(.7, config.roughness) })
-  if (config.material === 'Glossy') return new THREE.MeshPhysicalMaterial({ ...base, metalness: .08, roughness: Math.min(.18, config.roughness), clearcoat: .75, clearcoatRoughness: .12 })
-  if (config.material === 'Metallic') return new THREE.MeshStandardMaterial({ ...base, metalness: Math.max(.7, config.metalness), roughness: config.roughness })
-  if (config.material === 'Chrome') return new THREE.MeshPhysicalMaterial({ ...base, color: 0xd8e4ff, metalness: 1, roughness: Math.min(.16, config.roughness), clearcoat: .8 })
-  if (config.material === 'Gold') return new THREE.MeshPhysicalMaterial({ ...base, color: 0xf5bd3f, metalness: .95, roughness: Math.min(.28, config.roughness), clearcoat: .45 })
-  if (config.material === 'Silver') return new THREE.MeshStandardMaterial({ ...base, color: 0xc9d0df, metalness: .92, roughness: Math.min(.32, config.roughness) })
-  if (config.material === 'Neon') return new THREE.MeshStandardMaterial({ ...base, metalness: .05, roughness: .25, emissive: new THREE.Color(config.color), emissiveIntensity: 1.35 })
-  if (config.material === 'Glass-like') return new THREE.MeshPhysicalMaterial({ ...base, metalness: .02, roughness: Math.min(.16, config.roughness), transmission: .42, transparent: true, opacity: .78, ior: 1.35, thickness: .3 })
-  return new THREE.MeshStandardMaterial({ ...base, metalness: .08, roughness: Math.max(.24, config.roughness) })
+function materialFor(config, color, isFront = false) {
+  const transparent = config.opacity < .999 || config.material === 'Glass'
+  const base = { color: isFront ? 0xffffff : new THREE.Color(color), metalness: config.metalness, roughness: config.roughness, side: THREE.DoubleSide, transparent, opacity: config.opacity, vertexColors: isFront }
+  const emission = { emissive: new THREE.Color(config.emissionColor), emissiveIntensity: config.material === 'Emissive' ? Math.max(.08, config.emissionIntensity) : config.emissionIntensity * .25 }
+  if (config.material === 'Matte') return new THREE.MeshStandardMaterial({ ...base, ...emission, metalness: 0, roughness: Math.max(.68, config.roughness) })
+  if (config.material === 'Glossy') return new THREE.MeshPhysicalMaterial({ ...base, ...emission, metalness: Math.min(.18, config.metalness), roughness: Math.min(.2, config.roughness), clearcoat: .82, clearcoatRoughness: .1 })
+  if (config.material === 'Metallic') return new THREE.MeshStandardMaterial({ ...base, ...emission, metalness: Math.max(.7, config.metalness) })
+  if (config.material === 'Chrome') return new THREE.MeshPhysicalMaterial({ ...base, ...emission, metalness: 1, roughness: Math.min(.16, config.roughness), clearcoat: .9 })
+  if (config.material === 'Glass') return new THREE.MeshPhysicalMaterial({ ...base, ...emission, metalness: Math.min(.15, config.metalness), roughness: Math.min(.16, config.roughness), transmission: .58, transparent: true, opacity: Math.min(config.opacity, .86), ior: 1.35, thickness: .35 })
+  if (config.material === 'Rubber') return new THREE.MeshStandardMaterial({ ...base, ...emission, metalness: 0, roughness: Math.max(.76, config.roughness) })
+  if (config.material === 'Ceramic') return new THREE.MeshPhysicalMaterial({ ...base, ...emission, metalness: .04, roughness: Math.min(.3, config.roughness), clearcoat: .42 })
+  if (config.material === 'Pearl') return new THREE.MeshPhysicalMaterial({ ...base, ...emission, metalness: .12, roughness: Math.min(.24, config.roughness), iridescence: .6, iridescenceIOR: 1.3 })
+  if (config.material === 'Gold') return new THREE.MeshPhysicalMaterial({ ...base, ...emission, metalness: Math.max(.9, config.metalness), roughness: Math.min(.3, config.roughness), clearcoat: .45 })
+  if (config.material === 'Silver') return new THREE.MeshStandardMaterial({ ...base, ...emission, metalness: Math.max(.88, config.metalness), roughness: Math.min(.32, config.roughness) })
+  if (config.material === 'Emissive') return new THREE.MeshStandardMaterial({ ...base, emissive: new THREE.Color(config.emissionColor), emissiveIntensity: Math.max(.08, config.emissionIntensity), metalness: Math.min(.25, config.metalness), roughness: Math.min(.3, config.roughness) })
+  if (config.material === 'Holographic') return new THREE.MeshPhysicalMaterial({ ...base, ...emission, metalness: Math.max(.55, config.metalness), roughness: Math.min(.24, config.roughness), iridescence: 1, iridescenceIOR: 1.3, iridescenceThicknessRange: [100, 800], clearcoat: .75 })
+  return new THREE.MeshStandardMaterial({ ...base, ...emission, metalness: Math.min(.12, config.metalness), roughness: Math.max(.28, config.roughness) })
+}
+
+function applyVertexColors(geometry, config) {
+  geometry.computeBoundingBox(); const box = geometry.boundingBox; const positions = geometry.getAttribute('position'); const colors = new Float32Array(positions.count * 3)
+  const start = new THREE.Color(config.gradientEnabled ? config.gradientStart : config.frontColor); const end = new THREE.Color(config.gradientEnabled ? config.gradientEnd : config.frontColor); const size = new THREE.Vector3(); box.getSize(size); const center = box.getCenter(new THREE.Vector3()); const scratch = new THREE.Color()
+  for (let index = 0; index < positions.count; index += 1) { const x = positions.getX(index), y = positions.getY(index); const xRatio = size.x ? (x - box.min.x) / size.x : .5; const yRatio = size.y ? (y - box.min.y) / size.y : .5; const ratio = config.gradientDirection === 'Vertical' ? yRatio : config.gradientDirection === 'Diagonal' ? (xRatio + yRatio) / 2 : config.gradientDirection === 'Radial' ? Math.min(1, Math.hypot((x - center.x) / Math.max(size.x / 2, .001), (y - center.y) / Math.max(size.y / 2, .001))) : xRatio; scratch.copy(start).lerp(end, THREE.MathUtils.clamp(ratio, 0, 1)); colors.set([scratch.r, scratch.g, scratch.b], index * 3) }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+}
+
+function updateAppearance(group, config) {
+  group?.traverse(child => {
+    if (child.userData.typographyGlyph) { const previous = Array.isArray(child.material) ? child.material : [child.material]; if (child.geometry) applyVertexColors(child.geometry, config); child.material = [materialFor(config, config.frontColor, true), materialFor(config, config.sideColor)]; previous.forEach(material => material.dispose()) }
+    if (child.userData.typographyOutline) { child.material.color.set(config.bevelColor); child.material.opacity = config.opacity }
+  })
 }
 
 function disposeObject(object) {
@@ -37,8 +57,8 @@ function disposeObject(object) {
 
 function createTextGroup(font, config) {
   const group = new THREE.Group(); group.name = 'Local 3D Typography'
-  const frontMaterial = materialFor(config); const sideMaterial = frontMaterial.clone(); sideMaterial.color.multiplyScalar(.74)
-  const edgeMaterial = new THREE.LineBasicMaterial({ color: new THREE.Color(config.color).lerp(new THREE.Color(0xffffff), .3), transparent: true, opacity: .92 })
+  const frontMaterial = materialFor(config, config.frontColor, true); const sideMaterial = materialFor(config, config.sideColor)
+  const edgeMaterial = new THREE.LineBasicMaterial({ color: config.bevelColor, transparent: true, opacity: config.opacity })
   const parameters = { font, size: config.size, depth: Math.max(.035, config.depth), curveSegments: 8, bevelEnabled: config.meshStyle === 'Beveled' || config.bevel > 0, bevelThickness: Math.min(config.bevel, config.depth * .45), bevelSize: Math.min(config.bevel, config.size * .12), bevelSegments: 3 }
   const widthCache = new Map()
   function characterWidth(character) {
@@ -62,9 +82,9 @@ function createTextGroup(font, config) {
     line.forEach(({ character, advance }) => {
       if (character !== ' ') {
         const geometry = new TextGeometry(character, parameters); geometry.computeVertexNormals(); geometry.computeBoundingBox()
-        const mesh = new THREE.Mesh(geometry, [frontMaterial, sideMaterial]); mesh.position.set(x, y, 0); mesh.castShadow = true; mesh.receiveShadow = true; group.add(mesh)
+        applyVertexColors(geometry, config); const mesh = new THREE.Mesh(geometry, [frontMaterial, sideMaterial]); mesh.userData.typographyGlyph = true; mesh.position.set(x, y, 0); mesh.castShadow = true; mesh.receiveShadow = true; group.add(mesh)
         vertices += geometry.getAttribute('position').count; triangles += geometry.index ? geometry.index.count / 3 : geometry.getAttribute('position').count / 3; characterCount += 1
-        if (config.meshStyle === 'Outline') { const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 18), edgeMaterial); edges.position.copy(mesh.position); edges.renderOrder = 2; group.add(edges) }
+        if (config.meshStyle === 'Outline') { const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 18), edgeMaterial); edges.userData.typographyOutline = true; edges.position.copy(mesh.position); edges.renderOrder = 2; group.add(edges) }
       }
       x += advance
     })
@@ -104,7 +124,10 @@ export default function TypographyViewer({ config, validText, onMeshReady }) {
       } catch (buildError) { if (!cancelled) { setError(`Could not create the local text mesh: ${buildError.message || 'font loading failed.'}`); onMeshReady?.(null) } } finally { if (!cancelled) setBuilding(false) }
     }, 120)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [config, validText, onMeshReady])
+  }, [config.text, config.fontStyle, config.meshStyle, config.depth, config.bevel, config.size, config.letterSpacing, config.lineSpacing, config.maxLineWidth, config.alignment, config.rotationX, config.rotationY, config.rotationZ, validText, onMeshReady])
+  useEffect(() => {
+    updateAppearance(runtimeRef.current.group, config)
+  }, [config.material, config.frontColor, config.sideColor, config.bevelColor, config.gradientEnabled, config.gradientStart, config.gradientEnd, config.gradientDirection, config.metalness, config.roughness, config.opacity, config.emissionColor, config.emissionIntensity])
   function resetCamera() { const runtime = runtimeRef.current; const group = runtime.group; if (!group) return; const box = new THREE.Box3().setFromObject(group); const center = box.getCenter(new THREE.Vector3()); const size = box.getSize(new THREE.Vector3()); const largest = Math.max(size.x, size.y, size.z, 1); const distance = largest / (2 * Math.tan(THREE.MathUtils.degToRad(runtime.camera.fov / 2))) * 1.48; runtime.camera.position.set(center.x + largest * .22, center.y + largest * .1, center.z + Math.max(distance, 2.6)); runtime.controls.target.copy(center); runtime.controls.update() }
   async function exportGlb() { const group = runtimeRef.current.group; if (!group) return; try { const output = await new GLTFExporter().parseAsync(group, { binary: true, onlyVisible: true }); const url = URL.createObjectURL(new Blob([output], { type: 'model/gltf-binary' })); const link = document.createElement('a'); link.href = url; link.download = `${config.text.trim().replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '') || '3d-typography'}.glb`; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1500) } catch (exportError) { setError(`GLB export failed: ${exportError.message || 'the local mesh could not be serialized.'}`) } }
   return <section className="typography-viewer-shell"><div className="typography-viewer-toolbar"><span>{building ? 'Building local geometry…' : validText ? '3D mesh preview' : 'Enter supported text to preview'}</span><div><button className="btn btn-secondary" onClick={resetCamera} disabled={!validText}><RotateCcw size={15} /> Reset camera</button><button className="btn btn-secondary" onClick={() => mountRef.current?.requestFullscreen?.()}><Expand size={15} /> Fullscreen</button><button className="btn btn-primary" onClick={exportGlb} disabled={!validText || building}><Download size={15} /> Download GLB</button></div></div><div className="typography-canvas" ref={mountRef} />{error && <p className="typography-viewer-error">{error}</p>}</section>

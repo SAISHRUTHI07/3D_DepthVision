@@ -21,6 +21,7 @@ router = APIRouter()
 # Directories
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UPLOAD_DIR = os.path.join(os.path.dirname(BASE_DIR), "uploads")
+MANIFEST_DIR = os.path.join(UPLOAD_DIR, ".manifests")
 MODEL_DIR = os.path.join(os.path.dirname(BASE_DIR), "models")
 TEXT3D_MODEL_DIR = os.path.join(os.path.dirname(BASE_DIR), "generated_models")
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -34,6 +35,13 @@ class GCPPoint(BaseModel):
 
 class CalibrateRequest(BaseModel):
     gcp_points: List[GCPPoint]
+
+class CharacterReconstructRequest(BaseModel):
+    """Character-only refinement request; keeps the SIH depth pipeline intact."""
+    file_id: str
+    quality: str = "Standard"
+    style: str = "Stylized"
+    grid_size: int = Field(160, ge=64, le=256)
 
 class TextTo3DRequest(BaseModel):
     # ``prompt`` remains accepted for older browser sessions, but the current
@@ -70,8 +78,35 @@ def _load_finite_array(path: str, label: str) -> np.ndarray:
     return np.nan_to_num(array, nan=replacement, posinf=replacement, neginf=replacement)
 
 
-def _find_original_file(file_id: str) -> str | None:
-    pattern = os.path.join(UPLOAD_DIR, f"{file_id}.*")
+def _workspace_info(file_id: str) -> dict:
+    """Resolve one immutable upload to its own reconstruction workspace."""
+    if not re.fullmatch(r"[a-f0-9]{32}", file_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid upload identifier.")
+    manifest_path = os.path.join(MANIFEST_DIR, f"{file_id}.json")
+    try:
+        with open(manifest_path, encoding="utf-8") as manifest_file:
+            info = json.load(manifest_file)
+    except FileNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Uploaded image not found or belongs to an older unscoped upload.")
+    except (OSError, json.JSONDecodeError):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Upload workspace metadata could not be read.")
+    workspace_type = info.get("reconstruction_type")
+    if workspace_type not in {"object", "terrain", "human", "character"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload workspace type is invalid.")
+    return info
+
+
+def _workspace_dir(file_id: str, reconstruction_type: str | None = None) -> tuple[str, dict]:
+    info = _workspace_info(file_id)
+    if reconstruction_type and info["reconstruction_type"] != reconstruction_type:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"This input belongs to the {info['reconstruction_type']} workflow, not {reconstruction_type} reconstruction.")
+    path = os.path.join(UPLOAD_DIR, info["reconstruction_type"])
+    return path, info
+
+
+def _find_original_file(file_id: str, reconstruction_type: str | None = None) -> str | None:
+    workspace_dir, _ = _workspace_dir(file_id, reconstruction_type)
+    pattern = os.path.join(workspace_dir, f"{file_id}.*")
     files = [
         path for path in glob.glob(pattern)
         if not path.endswith(("_depth_visual.png", "_depth.npy", "_elevation.npy"))
@@ -210,8 +245,42 @@ def _foreground_mask(image_path: str | None, normalized_depth: np.ndarray) -> tu
     return fallback, "central image fallback (segmentation uncertain)"
 
 
+def _character_mask_and_depth(image_path: str | None, normalized_depth: np.ndarray, quality: str) -> tuple[np.ndarray, np.ndarray, str, bool]:
+    """Refine the existing Depth Anything map for a person-shaped visible surface.
+
+    This intentionally does not infer a fictional full body.  It suppresses the
+    photographed background, preserves depth discontinuities with a bilateral
+    filter, and returns only evidence-supported foreground geometry.
+    """
+    mask, method = _foreground_mask(image_path, normalized_depth)
+    refined = normalized_depth.astype(np.float32, copy=True)
+    face_found = False
+    image = cv2.imread(image_path, cv2.IMREAD_COLOR) if image_path else None
+    if image is not None:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        cascade_factory = getattr(cv2, "CascadeClassifier", None)
+        cascade_data = getattr(getattr(cv2, "data", None), "haarcascades", None)
+        cascade = cascade_factory(cascade_data + "haarcascade_frontalface_default.xml") if cascade_factory and cascade_data else None
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.12, minNeighbors=4, minSize=(24, 24)) if cascade is not None and not cascade.empty() else ()
+        face_found = len(faces) > 0
+        # The largest detected face makes the central-person selection explicit;
+        # GrabCut remains the silhouette source for profiles/anime where Haar
+        # detection may be unavailable.
+        if face_found:
+            x, y, w, h = max(faces, key=lambda face: face[2] * face[3])
+            cv2.circle(mask, (x + w // 2, y + h // 2), max(w, h), 1, -1)
+            mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+            method += " + face-guided foreground retention"
+    diameter = 9 if quality == "High Quality" else 7 if quality == "Standard" else 5
+    refined = cv2.bilateralFilter(refined, diameter, 0.10, 5.0)
+    # Keep a depth edge where the mask meets the background instead of blurring
+    # person pixels into walls/floor. This produces a clean, non-terrain mesh.
+    refined = np.nan_to_num(refined, nan=.5, posinf=1.0, neginf=0.0)
+    return mask.astype(np.uint8), np.clip(refined, 0, 1), method, face_found
+
+
 @router.get("/process/{file_id}/input-analysis")
-def input_analysis(file_id: str):
+def input_analysis(file_id: str, reconstruction_type: str = Query(...)):
     """Return measurable, non-generative input-quality signals.
 
     A scene classifier is intentionally not invented here: the installed local
@@ -219,7 +288,7 @@ def input_analysis(file_id: str):
     signals to guide the user toward the terrain or object workflow and asks for
     confirmation when scene type matters.
     """
-    image_path = _find_original_file(file_id)
+    image_path = _find_original_file(file_id, reconstruction_type)
     if not image_path:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Uploaded image not found.")
     image = cv2.imread(image_path, cv2.IMREAD_COLOR)
@@ -251,12 +320,13 @@ def input_analysis(file_id: str):
     }
 
 @router.post("/process/{file_id}/depth")
-def process_depth(file_id: str):
+def process_depth(file_id: str, reconstruction_type: str = Query(...)):
     """
     Run monocular depth estimation on a previously uploaded image.
     Saves the relative depth map and returns visualization metadata.
     """
-    pattern = os.path.join(UPLOAD_DIR, f"{file_id}.*")
+    workspace_dir, workspace = _workspace_dir(file_id, reconstruction_type)
+    pattern = os.path.join(workspace_dir, f"{file_id}.*")
     matching_files = glob.glob(pattern)
     
     original_files = [
@@ -277,13 +347,13 @@ def process_depth(file_id: str):
     try:
         result = depth_service.run_depth_estimation(
             image_path=image_path,
-            uploads_dir=UPLOAD_DIR,
+            uploads_dir=workspace_dir,
             file_id=file_id,
             ext=ext
         )
         
-        result["original_image_url"] = f"/uploads/{file_id}{ext}"
-        result["visual_depth_url"] = f"/uploads/{result['visual_depth_file']}"
+        result["original_image_url"] = f"/uploads/{workspace['reconstruction_type']}/{file_id}{ext}"
+        result["visual_depth_url"] = f"/uploads/{workspace['reconstruction_type']}/{result['visual_depth_file']}"
         result["file_id"] = file_id
         
         return result
@@ -299,12 +369,13 @@ def process_depth(file_id: str):
         )
 
 @router.post("/process/{file_id}/calibrate")
-def process_calibration(file_id: str, request: CalibrateRequest):
+def process_calibration(file_id: str, request: CalibrateRequest, reconstruction_type: str = Query("terrain")):
     """
     Calibrate a relative depth map to absolute/approximate physical elevation.
     Requires relative depth map (npy) to be already generated.
     """
-    depth_file_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    workspace_dir, _ = _workspace_dir(file_id, reconstruction_type)
+    depth_file_path = os.path.join(workspace_dir, f"{file_id}_depth.npy")
     if not os.path.exists(depth_file_path):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -328,7 +399,7 @@ def process_calibration(file_id: str, request: CalibrateRequest):
         )
         
         elevation_filename = f"{file_id}_elevation.npy"
-        elevation_path = os.path.join(UPLOAD_DIR, elevation_filename)
+        elevation_path = os.path.join(workspace_dir, elevation_filename)
         np.save(elevation_path, elevation_map)
         
         return {
@@ -351,6 +422,7 @@ def process_calibration(file_id: str, request: CalibrateRequest):
 @router.get("/process/{file_id}/terrain")
 def get_terrain_data(
     file_id: str,
+    reconstruction_type: str = Query("terrain"),
     grid_size: int = Query(128, ge=16, le=512, description="Target dimension of the downsampled square grid"),
     pixel_size: float = Query(1.0, gt=0, description="Horizontal scale (pixel size) in meters for slope calculations")
 ):
@@ -361,8 +433,9 @@ def get_terrain_data(
       - Confidence values (0-1)
     Allows smooth WebGL visualization in Three.js by optimizing the mesh density.
     """
-    elevation_path = os.path.join(UPLOAD_DIR, f"{file_id}_elevation.npy")
-    depth_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    workspace_dir, _ = _workspace_dir(file_id, reconstruction_type)
+    elevation_path = os.path.join(workspace_dir, f"{file_id}_elevation.npy")
+    depth_path = os.path.join(workspace_dir, f"{file_id}_depth.npy")
     
     # 1. Graceful elevation fallback: If not calibrated, perform relative calibration automatically
     is_gcp_calibrated = os.path.exists(elevation_path)
@@ -439,6 +512,7 @@ def get_terrain_data(
 @router.get("/process/{file_id}/object")
 def get_object_reconstruction_data(
     file_id: str,
+    reconstruction_type: str = Query(...),
     grid_size: int = Query(128, ge=32, le=256, description="Square mesh resolution for object reconstruction")
 ):
     """Prepare finite depth and silhouette data for a client-side textured mesh.
@@ -446,7 +520,8 @@ def get_object_reconstruction_data(
     The response is intentionally restricted to the visible surface and a marked
     estimated shell.  A single photograph cannot measure an object's back.
     """
-    depth_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    workspace_dir, _ = _workspace_dir(file_id, reconstruction_type)
+    depth_path = os.path.join(workspace_dir, f"{file_id}_depth.npy")
     if not os.path.exists(depth_path):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Depth map not found. Please run depth estimation first.")
     try:
@@ -458,7 +533,7 @@ def get_object_reconstruction_data(
         else:
             normalized = np.clip((depth - low) / (high - low), 0, 1)
         normalized = np.nan_to_num(normalized, nan=.5, posinf=1.0, neginf=0.0)
-        mask, segmentation_method = _foreground_mask(_find_original_file(file_id), normalized)
+        mask, segmentation_method = _foreground_mask(_find_original_file(file_id, reconstruction_type), normalized)
 
         depth_grid = downsample_grid(normalized, grid_size)
         mask_grid = downsample_grid(mask.astype(np.float32), grid_size)
@@ -490,6 +565,55 @@ def get_object_reconstruction_data(
         raise
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error preparing object reconstruction: {str(e)}")
+
+
+@router.post("/character/reconstruct")
+def reconstruct_character(request: CharacterReconstructRequest):
+    """Prepare a character-specific, depth-map-based visible-surface mesh.
+
+    This endpoint is deliberately separate from object reconstruction but uses
+    the same SIH methodology: Depth Anything output → finite normalization →
+    foreground-only depth refinement → client-side vertices/faces/normals/UVs.
+    """
+    if request.quality not in {"Draft", "Standard", "High Quality"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Character quality must be Draft, Standard, or High Quality.")
+    if request.style not in {"Realistic", "Stylized", "Cartoon", "Anime", "Chibi"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported character style.")
+    workspace_dir, _ = _workspace_dir(request.file_id, "character")
+    depth_path = os.path.join(workspace_dir, f"{request.file_id}_depth.npy")
+    if not os.path.exists(depth_path):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Depth map not found. Generate Depth Analysis before Character Reconstruction.")
+    try:
+        depth = _load_finite_array(depth_path, "depth map")
+        values = depth[np.isfinite(depth)]
+        low, high = np.percentile(values, [2, 98])
+        normalized = np.full_like(depth, .5, dtype=np.float32) if high - low < 1e-6 else np.clip((depth - low) / (high - low), 0, 1)
+        mask, refined_depth, segmentation_method, face_found = _character_mask_and_depth(_find_original_file(request.file_id, "character"), normalized, request.quality)
+        # Higher quality uses more samples in the same geometry algorithm; it is
+        # not merely a visual label.
+        grid_size = min(request.grid_size, {"Draft": 96, "Standard": 160, "High Quality": 224}[request.quality])
+        depth_grid = np.nan_to_num(downsample_grid(refined_depth, grid_size), nan=.5, posinf=1.0, neginf=0.0)
+        mask_grid = np.nan_to_num(downsample_grid(mask.astype(np.float32), grid_size), nan=0.0, posinf=0.0, neginf=0.0)
+        confidence_grid = np.clip(np.nan_to_num(downsample_grid(calculate_confidence(depth), grid_size), nan=0.0), 0, 1)
+        active = mask_grid > .45
+        if active.mean() < .025:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Please upload a clear human/person image for 3D Character reconstruction. A usable person foreground could not be isolated.")
+        ys, xs = np.where(active)
+        confidence = float(np.clip((confidence_grid[active].mean() if active.any() else 0) * (.94 if face_found else .82), 0, 1))
+        return {
+            "file_id": request.file_id, "grid_size": grid_size,
+            "depth_grid": depth_grid.flatten().tolist(), "object_mask": mask_grid.flatten().tolist(),
+            "confidence_grid": confidence_grid.flatten().tolist(), "reconstruction_confidence": confidence,
+            "segmentation_method": segmentation_method, "style": request.style, "quality": request.quality,
+            "face_detected": face_found,
+            "stats": {"depth_min": float(depth_grid.min()), "depth_max": float(depth_grid.max()), "mask_coverage": float(active.mean()), "subject_bounds": {"x_min": int(xs.min()), "x_max": int(xs.max()), "y_min": int(ys.min()), "y_max": int(ys.max())}},
+            "estimated_regions": "Only the photographed visible surface is depth-reconstructed. Side and back areas are an explicitly estimated shell, not measured anatomy.",
+            "pipeline": ["Analyzing image", "Extracting person foreground", "Refining Depth Anything depth", "Creating visible-surface mesh", "Projecting original texture", "Preparing viewer"],
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Character reconstruction could not be completed: {exc}")
 
 
 @router.post("/text3d/enhance")
@@ -572,6 +696,7 @@ def get_validated_text3d_model(filename: str):
 @router.get("/process/{file_id}/analytics")
 def query_point_analytics(
     file_id: str,
+    reconstruction_type: str = Query("terrain"),
     x: int = Query(..., description="Pixel X coordinate (column) in original image"),
     y: int = Query(..., description="Pixel Y coordinate (row) in original image"),
     pixel_size: float = Query(1.0, gt=0, description="Horizontal scale (pixel size) in meters")
@@ -580,8 +705,9 @@ def query_point_analytics(
     Lookup full-resolution elevation, slope, and confidence values at a specific pixel location.
     Provides precise analytics for point-and-click operations.
     """
-    elevation_path = os.path.join(UPLOAD_DIR, f"{file_id}_elevation.npy")
-    depth_path = os.path.join(UPLOAD_DIR, f"{file_id}_depth.npy")
+    workspace_dir, _ = _workspace_dir(file_id, reconstruction_type)
+    elevation_path = os.path.join(workspace_dir, f"{file_id}_elevation.npy")
+    depth_path = os.path.join(workspace_dir, f"{file_id}_depth.npy")
     
     if not os.path.exists(depth_path):
         raise HTTPException(

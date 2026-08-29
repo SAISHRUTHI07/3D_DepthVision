@@ -61,7 +61,7 @@ export default function CalibrationPanel({ fileId, uploadedFile, depthResult, ca
         .filter(pt => pt.elevation !== '' && !isNaN(parseFloat(pt.elevation)))
         .map(pt => ({ x: pt.x, y: pt.y, elevation: parseFloat(pt.elevation) }))
 
-      const res = await fetch(`/api/process/${fileId}/calibrate`, {
+      const res = await fetch(`/api/process/${fileId}/calibrate?reconstruction_type=terrain`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gcp_points: gcpPayload }),

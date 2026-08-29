@@ -1,7 +1,7 @@
 import { BarChart2, BookmarkPlus, CheckCircle2, Image } from 'lucide-react'
 
 function formatSize(bytes = 0) { return !bytes ? 'Not available' : bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(2)} MB` : `${Math.round(bytes / 1024)} KB` }
-function modeLabel(mode) { return mode === 'character' ? '3D Character' : mode === 'scene' ? '3D Image / Scene' : `3D ${mode?.[0]?.toUpperCase() || ''}${mode?.slice(1) || ''}` }
+function modeLabel(mode) { return mode === 'human' ? '3D Human' : mode === 'character' ? '3D Character' : `3D ${mode?.[0]?.toUpperCase() || ''}${mode?.slice(1) || ''}` }
 
 export default function AnalyticsPanel({ fileId, uploadedFile, depthResult, objectData, terrainData, inputAnalysis, history = [], reconstructionMode, inputType = 'single', inputViewCount = 1, onSave, canSave }) {
   if (!fileId || !uploadedFile) return <div className="state-box"><BarChart2 size={48} className="state-icon" /><h3>No project loaded</h3><p>Upload an image to view its reconstruction details and processing status.</p></div>

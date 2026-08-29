@@ -25,7 +25,7 @@ export default function FlythroughPanel({ fileId, depthResult, terrainData, onTe
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 45000)
     try {
-      const response = await fetch(`/api/process/${fileId}/terrain?grid_size=128`, { signal: controller.signal })
+      const response = await fetch(`/api/process/${fileId}/terrain?grid_size=128&reconstruction_type=terrain`, { signal: controller.signal })
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || 'Terrain could not be loaded.') }
       const data = await response.json()
       const expected = data.grid_size ** 2

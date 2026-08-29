@@ -2,12 +2,8 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 import os
 import uuid
 import shutil
-<<<<<<< HEAD
 import json
-from PIL import Image, UnidentifiedImageError
-=======
 from PIL import Image, ImageOps, UnidentifiedImageError
->>>>>>> 081ee224014872b72a896e33afd4ea69152e98fc
 
 router = APIRouter()
 

@@ -38,9 +38,6 @@ function createVisibleSurfaceGeometry(data, image, depthScale, detail) {
     const a = vertexByCell[row * n + column], b = vertexByCell[row * n + column + 1], c = vertexByCell[(row + 1) * n + column], d = vertexByCell[(row + 1) * n + column + 1]
     if (a >= 0 && b >= 0 && c >= 0 && d >= 0) frontIndices.push(a, c, b, b, c, d)
   }
-  // A very fragmented mask can have no complete cell at low resolution.  Using
-  // the depth grid in that rare case prevents an invisible result while keeping
-  // the status message explicit about the estimated rear shell.
   if (!frontIndices.length) return createVisibleSurfaceGeometry({ ...data, object_mask: data.object_mask.map(() => 1) }, image, depthScale, detail)
   const frontVertexCount = index
   const zValues = positions.filter((_, positionIndex) => positionIndex % 3 === 2)
@@ -57,8 +54,6 @@ function createVisibleSurfaceGeometry(data, image, depthScale, detail) {
     for (const [dy, dx] of neighbours) {
       const nr = row + dy, nc = column + dx
       if (nr >= 0 && nr < n && nc >= 0 && nc < n && vertexByCell[nr * n + nc] >= 0) continue
-      // Pair each exposed vertex with its next edge vertex so the estimated
-      // rear surface is connected by actual side-wall triangles.
       const edgeRow = dx !== 0 ? Math.min(row + 1, n - 1) : row
       const edgeColumn = dy !== 0 ? Math.min(column + 1, n - 1) : column
       const b = vertexByCell[edgeRow * n + edgeColumn]

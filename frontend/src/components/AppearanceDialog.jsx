@@ -10,6 +10,11 @@ const THEMES = [
   { id: 'soft-blue', name: 'Soft Blue', group: 'Light', note: 'Calm blue-grey workspace' },
   { id: 'pearl', name: 'Pearl', group: 'Light', note: 'Warm neutral paper surface' },
   { id: 'light-violet', name: 'Light Violet', group: 'Light', note: 'Pale modern lavender' },
+  { id: 'sunset', name: 'Sunset Ember', group: 'Dark', note: 'Warm plum and coral glow' },
+  { id: 'forest', name: 'Forest Canopy', group: 'Dark', note: 'Deep green with mint accents' },
+  { id: 'ocean', name: 'Ocean Depths', group: 'Dark', note: 'Ink blue with electric cyan' },
+  { id: 'rose', name: 'Rose Quartz', group: 'Light', note: 'Soft blush with berry accents' },
+  { id: 'sand', name: 'Sandstone', group: 'Light', note: 'Earthy sand and terracotta tones' },
 ]
 
 export default function AppearanceDialog({ open, theme, onSelect, onClose }) {

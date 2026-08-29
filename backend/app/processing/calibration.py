@@ -1,6 +1,28 @@
 import numpy as np
 import os
 
+
+def relative_depth_to_elevation(depth_map: np.ndarray) -> np.ndarray:
+    """Create a stable *relative* terrain height field from monocular depth.
+
+    Depth Anything produces inverse/relative depth: a larger value means that a
+    pixel is closer to the camera.  For a terrain image viewed from above this
+    corresponds to higher terrain.  Percentile clipping prevents a handful of
+    bad depth pixels from flattening all of the useful relief, while the small
+    edge-preserving smoothing is applied by the caller before mesh export.
+
+    This is deliberately not called a physical elevation calibration.  A true
+    elevation in metres still requires ground-control points.
+    """
+    values = depth_map[np.isfinite(depth_map)]
+    if values.size == 0:
+        raise ValueError("Depth map contains no finite values")
+    low, high = np.percentile(values, (2.0, 98.0))
+    if not np.isfinite(low) or not np.isfinite(high) or high - low < 1e-6:
+        return np.zeros_like(depth_map, dtype=np.float32)
+    normalized = np.clip((depth_map - low) / (high - low), 0.0, 1.0)
+    return (normalized * 100.0).astype(np.float32)
+
 def calibrate_depth_to_elevation(depth_map: np.ndarray, gcp_points: list) -> tuple:
     """
     Fits a linear mapping (Elevation = Depth * Scale + Offset) based on Ground Control Points (GCPs).

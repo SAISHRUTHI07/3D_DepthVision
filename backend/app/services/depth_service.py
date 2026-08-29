@@ -1,7 +1,7 @@
 import os
 import torch
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 import cv2
 from transformers import pipeline
 from huggingface_hub import snapshot_download
@@ -64,7 +64,11 @@ class DepthService:
         self.load_model()
         
         # Load image
-        image = Image.open(image_path).convert("RGB")
+        # Browser previews honour EXIF orientation. Apply the same orientation
+        # before inference so the generated depth map covers and aligns with the
+        # complete displayed image rather than an unrotated camera frame.
+        with Image.open(image_path) as source_image:
+            image = ImageOps.exif_transpose(source_image).convert("RGB")
         orig_w, orig_h = image.size
         
         # Run inference
@@ -83,7 +87,7 @@ class DepthService:
             depth_np = np.array(predicted_depth, dtype=np.float32)
             
         # Resize raw depth to original image resolution for accurate coordinate mapping
-        depth_resized = cv2.resize(depth_np, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        depth_resized = cv2.resize(depth_np, (orig_w, orig_h), interpolation=cv2.INTER_CUBIC).astype(np.float32)
         valid = np.isfinite(depth_resized)
         if not valid.any():
             raise ValueError("Depth model returned no finite depth values for this image.")
@@ -101,9 +105,12 @@ class DepthService:
         # Let's normalize it to 0-255.
         depth_min = float(depth_resized.min())
         depth_max = float(depth_resized.max())
+        # A few model outliers otherwise consume the full colour range and
+        # make most of the uploaded image look like one flat colour.
+        visual_min, visual_max = np.percentile(depth_resized, [2.0, 98.0])
         
-        if depth_max - depth_min > 0:
-            depth_normalized = ((depth_resized - depth_min) / (depth_max - depth_min) * 255.0).astype(np.uint8)
+        if visual_max - visual_min > 1e-6:
+            depth_normalized = (np.clip((depth_resized - visual_min) / (visual_max - visual_min), 0.0, 1.0) * 255.0).astype(np.uint8)
         else:
             depth_normalized = np.zeros_like(depth_resized, dtype=np.uint8)
             
@@ -125,6 +132,8 @@ class DepthService:
             "height": orig_h,
             "min_val": float(depth_min),
             "max_val": float(depth_max),
+            "visual_min_val": float(visual_min),
+            "visual_max_val": float(visual_max),
             "processing_time_sec": round(elapsed_time, 3),
             "model_name": MODEL_ID
         }

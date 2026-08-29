@@ -2,8 +2,12 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 import os
 import uuid
 import shutil
+<<<<<<< HEAD
 import json
 from PIL import Image, UnidentifiedImageError
+=======
+from PIL import Image, ImageOps, UnidentifiedImageError
+>>>>>>> 081ee224014872b72a896e33afd4ea69152e98fc
 
 router = APIRouter()
 
@@ -91,7 +95,7 @@ async def upload_image(
         with Image.open(stored_filepath) as image:
             image.verify()
         with Image.open(stored_filepath) as image:
-            width, height = image.size
+            width, height = ImageOps.exif_transpose(image).size
         if width * height > MAX_IMAGE_PIXELS:
             raise ValueError(f"Image dimensions are too large ({width}×{height}). Maximum is {MAX_IMAGE_PIXELS:,} pixels.")
     except (UnidentifiedImageError, OSError, ValueError) as e:

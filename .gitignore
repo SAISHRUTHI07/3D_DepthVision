@@ -6,3 +6,4 @@ backend/models/
 backend/uploads/
 __pycache__/
 *.pyc
+backend/.venv/

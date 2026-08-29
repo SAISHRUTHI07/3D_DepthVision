@@ -13,8 +13,8 @@ import time
 import uuid
 from app.services.depth_service import depth_service, DepthModelUnavailable
 from app.services.text3d_service import text3d_service, Text3DProviderError
-from app.processing.calibration import calibrate_depth_to_elevation
-from app.processing.analytics import calculate_slope, calculate_confidence, downsample_grid
+from app.processing.calibration import calibrate_depth_to_elevation, relative_depth_to_elevation
+from app.processing.analytics import calculate_slope, calculate_confidence, downsample_grid, smooth_terrain_grid
 
 router = APIRouter()
 
@@ -437,7 +437,9 @@ def get_terrain_data(
     elevation_path = os.path.join(workspace_dir, f"{file_id}_elevation.npy")
     depth_path = os.path.join(workspace_dir, f"{file_id}_depth.npy")
     
-    # 1. Graceful elevation fallback: If not calibrated, perform relative calibration automatically
+    # A saved elevation map exists only after the user supplied ground-control
+    # points.  Relative terrain must not be saved here: otherwise a second load
+    # is incorrectly presented as calibrated data.
     is_gcp_calibrated = os.path.exists(elevation_path)
     
     if not os.path.exists(depth_path):
@@ -463,11 +465,11 @@ def get_terrain_data(
                 detail=f"Error loading calibrated elevation map: {str(e)}"
             )
     else:
-        # Perform default relative mapping (0m to 100m range)
+        # Depth Anything uses larger values for nearer pixels.  In the intended
+        # overhead terrain workflow that means higher ground.  Clip outliers and
+        # lightly smooth the height field before decimating it into a mesh.
         try:
-            elevation_map, _, _, _, _ = calibrate_depth_to_elevation(depth_map, [])
-            # Save it so it's cached
-            np.save(elevation_path, elevation_map)
+            elevation_map = relative_depth_to_elevation(depth_map)
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -475,6 +477,8 @@ def get_terrain_data(
             )
 
     try:
+        # Filter isolated depth artifacts while retaining meaningful ridges and slopes.
+        elevation_map = smooth_terrain_grid(elevation_map)
         # 2. Calculate Slope and Confidence
         slope_map = calculate_slope(elevation_map, pixel_size)
         confidence_map = calculate_confidence(depth_map)
@@ -483,6 +487,13 @@ def get_terrain_data(
         downsampled_elevation = downsample_grid(elevation_map, grid_size)
         downsampled_slope = downsample_grid(slope_map, grid_size)
         downsampled_confidence = downsample_grid(confidence_map, grid_size)
+        values = downsampled_elevation[np.isfinite(downsampled_elevation)]
+        visual_low, visual_high = np.percentile(values, [1.0, 99.0]) if values.size else (0.0, 1.0)
+        if visual_high - visual_low < 1e-6:
+            visual_low, visual_high = float(downsampled_elevation.min()), float(downsampled_elevation.max())
+        depth_low, depth_high = np.percentile(depth_map[np.isfinite(depth_map)], [2.0, 98.0])
+        normalized_depth = np.clip((depth_map - depth_low) / max(depth_high - depth_low, 1e-6), 0, 1)
+        downsampled_depth = downsample_grid(normalized_depth.astype(np.float32), grid_size)
         
         # 4. Extract stats
         stats = {
@@ -491,14 +502,21 @@ def get_terrain_data(
             "slope_min": float(downsampled_slope.min()),
             "slope_max": float(downsampled_slope.max()),
             "confidence_min": float(downsampled_confidence.min()),
-            "confidence_max": float(downsampled_confidence.max())
+            "confidence_max": float(downsampled_confidence.max()),
+            "visual_min": float(visual_low),
+            "visual_max": float(visual_high),
+            "is_flat": bool(float(np.ptp(downsampled_elevation)) < 1e-4)
         }
         
         return {
             "file_id": file_id,
             "grid_size": grid_size,
             "is_calibrated": is_gcp_calibrated,
+            "source_width": int(depth_map.shape[1]),
+            "source_height": int(depth_map.shape[0]),
+            "height_reference": "ground-control elevation" if is_gcp_calibrated else "relative camera-depth relief (not metres)",
             "elevation_grid": np.nan_to_num(downsampled_elevation, nan=0.0, posinf=0.0, neginf=0.0).flatten().tolist(),
+            "depth_grid": np.clip(np.nan_to_num(downsampled_depth, nan=0.0, posinf=1.0, neginf=0.0), 0, 1).flatten().tolist(),
             "slope_grid": np.nan_to_num(downsampled_slope, nan=0.0, posinf=0.0, neginf=0.0).flatten().tolist(),
             "confidence_grid": np.clip(np.nan_to_num(downsampled_confidence, nan=0.0, posinf=0.0, neginf=0.0), 0, 1).flatten().tolist(),
             "stats": stats
@@ -742,8 +760,10 @@ def query_point_analytics(
                 detail=f"Error loading elevation map: {str(e)}"
             )
     else:
-        # Load relative scale
-        elevation_map, _, _, _, _ = calibrate_depth_to_elevation(depth_map, [])
+        # Match the terrain renderer's robust relative-height conversion so a
+        # click reports the value actually represented by the mesh.
+        elevation_map = relative_depth_to_elevation(depth_map)
+        elevation_map = cv2.bilateralFilter(elevation_map.astype(np.float32), 5, 10, 3)
         
     try:
         # Calculate full maps to get exact local gradient at the queried point

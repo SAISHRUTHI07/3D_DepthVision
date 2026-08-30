@@ -132,6 +132,8 @@ export default function ObjectViewer({ fileId, uploadedFile, depthResult, object
     if (animation) cancelAnimationFrame(animation); if (resize) window.removeEventListener('resize', resize)
     geometry?.dispose(); materials?.forEach(material => { material.map?.dispose(); material.dispose() }); renderer?.dispose(); mountRef.current?.replaceChildren(); sceneRef.current = {}
   }
+  // buildScene is recreated from the current local viewer configuration.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!objectData || !mountRef.current) return undefined
     buildScene()

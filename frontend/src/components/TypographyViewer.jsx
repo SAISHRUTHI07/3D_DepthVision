@@ -97,6 +97,8 @@ function createTextGroup(font, config) {
 
 export default function TypographyViewer({ config, validText, onMeshReady }) {
   const mountRef = useRef(null); const runtimeRef = useRef({}); const [error, setError] = useState(null); const [building, setBuilding] = useState(false)
+  // The selected appearance values are listed below to avoid rebuilding on unrelated settings.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const mount = mountRef.current; if (!mount) return undefined
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true }); renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.18; mount.replaceChildren(renderer.domElement)
@@ -107,6 +109,8 @@ export default function TypographyViewer({ config, validText, onMeshReady }) {
     runtimeRef.current = { renderer, scene, camera, controls, grid, resize, group: null, frame: runtimeRef.current.frame }
     return () => { cancelAnimationFrame(runtimeRef.current.frame); window.removeEventListener('resize', resize); disposeObject(runtimeRef.current.group); renderer.dispose(); mount.replaceChildren(); runtimeRef.current = {} }
   }, [])
+  // The selected material values are listed below to avoid unnecessary updates.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const runtime = runtimeRef.current; if (!runtime.renderer) return undefined
     const background = BACKGROUNDS[config.background] || BACKGROUNDS['Dark studio']; runtime.renderer.setClearColor(background.color, background.alpha); runtime.scene.background = background.alpha ? new THREE.Color(background.color) : null; runtime.grid.visible = config.showGrid; runtime.controls.autoRotate = config.autoRotate

@@ -5,7 +5,7 @@ import { Play, Pause, Square, RotateCcw, AlertCircle, X, Camera } from 'lucide-r
 
 const finite = value => Number.isFinite(value) ? value : 0
 
-export default function FlythroughPanel({ fileId, depthResult, terrainData, onTerrainLoaded, onExit }) {
+export default function FlythroughPanel({ fileId, depthResult, terrainData, mode = 'terrain', onTerrainLoaded, onExit }) {
   const mountRef = useRef(null)
   const runtimeRef = useRef({ playing: false, progress: 0, frame: 0, speed: 1, clearance: 105, distance: 265, mode: 'orbit' })
   const sceneRef = useRef({})
@@ -25,7 +25,7 @@ export default function FlythroughPanel({ fileId, depthResult, terrainData, onTe
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 45000)
     try {
-      const response = await fetch(`/api/process/${fileId}/terrain?grid_size=128&reconstruction_type=terrain`, { signal: controller.signal })
+      const response = await fetch(`/api/process/${fileId}/terrain?grid_size=128&reconstruction_type=${encodeURIComponent(mode)}`, { signal: controller.signal })
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.detail || 'Terrain could not be loaded.') }
       const data = await response.json()
       const expected = data.grid_size ** 2
@@ -102,6 +102,8 @@ export default function FlythroughPanel({ fileId, depthResult, terrainData, onTe
     mountRef.current?.replaceChildren(); sceneRef.current = {}
   }
 
+  // buildScene reads the latest local controls; terrainData controls rebuilds.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!terrainData || !mountRef.current) return undefined
     buildScene(terrainData)

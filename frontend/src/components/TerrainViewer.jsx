@@ -12,7 +12,7 @@ export default function TerrainViewer({ fileId, depthResult, terrainData, onTerr
   const [exag,     setExag]     = useState(1.5)
   const [vizMode,  setVizMode]  = useState('textured') // textured | elevation | wireframe | depth
   const [displayMode, setDisplayMode] = useState('3d')
-  const [showTexture, setShowTexture] = useState(true)
+  const [showTexture] = useState(true)
   const [autoRotate, setAutoRotate] = useState(false)
   const [stage, setStage] = useState('Ready to build terrain')
   const [selectedPoint, setSelectedPoint] = useState(null)
@@ -229,6 +229,8 @@ export default function TerrainViewer({ fileId, depthResult, terrainData, onTerr
   }
 
   // ── Build / rebuild Three.js scene ─────────────────────────────────────────
+  // The scene builder is intentionally recreated with current viewer settings.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!terrainData || !mountRef.current) return undefined
     buildScene()

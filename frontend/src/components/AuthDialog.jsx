@@ -16,7 +16,7 @@ export default function AuthDialog({ open, purpose = 'general', onClose, onSave 
     <form className="auth-dialog" onSubmit={submit} onMouseDown={event => event.stopPropagation()}>
       <button className="modal-close" type="button" onClick={onClose} aria-label="Close sign in">×</button>
       <img className="auth-logo-image" src="/depthvision-logo.png" alt="3D DepthVision logo" />
-      <p className="auth-welcome">{purpose === 'history' ? 'Login to show history' : 'Welcome to 3D DepthVision'}</p>
+      <p className="auth-welcome">{purpose === 'history' ? 'Login / Sign in to show history' : 'Welcome to 3D DepthVision'}</p>
       <button className="oauth-button" type="button" onClick={() => providerUnavailable('Google')}><span className="google-mark">G</span> Continue with Google</button>
       <div className="auth-divider"><span>or</span></div>
       <label className="auth-email">Email<input value={email} onChange={event => setEmail(event.target.value)} placeholder="yours@example.com" type="email" autoFocus /></label>

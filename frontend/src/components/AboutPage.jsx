@@ -1,4 +1,4 @@
-import { Bot, Box, Building2, Camera, ChevronRight, CloudLightning, Compass, GraduationCap, Map, Mountain, ScanLine, Video, Waypoints } from 'lucide-react'
+import { Bot, Box, Building2, ChevronRight, CloudLightning, Compass, GraduationCap, Map, Mountain, ScanLine, Video, Waypoints } from 'lucide-react'
 
 const features = [{ icon: Box, title: '2D to 3D Conversion', copy: 'Transform a single 2D image into an interactive 3D representation.' }, { icon: Mountain, title: 'Height Estimation', copy: 'Estimate relative terrain elevation and depth from visual information.' }, { icon: ScanLine, title: 'Terrain Analysis', copy: 'Surface meaningful terrain insights through clear visual exploration.' }, { icon: Video, title: '3D Flythrough', copy: 'Navigate the reconstructed terrain through an immersive flythrough.' }]
 const steps = ['Upload Image', 'AI Depth Analysis', 'Height Estimation', '3D Terrain Reconstruction', 'Interactive Flythrough']
